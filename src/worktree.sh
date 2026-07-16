@@ -140,6 +140,32 @@ _worktree_clone() {
     echo "Done. Worktree '$main_branch' is ready at ./$repo_name/$main_branch"
 }
 
+# Symlink every entry from the repo-level shared dir into a new worktree.
+# Drop any file or folder into <root>/.shared (which lives next to the bare
+# .git) and it shows up — as a symlink — in every worktree. This keeps
+# gitignored config such as .env.local as a single source of truth shared
+# across all branches. Works for both files and directories, and never
+# clobbers something the worktree already has.
+_worktree_link_shared() {
+    local root="$1" target="$2"
+    local abs_root shared
+    abs_root="$(cd "$root" 2>/dev/null && pwd)" || return 0
+    shared="$abs_root/.shared"
+    [ -d "$shared" ] || return 0
+
+    # Subshell so nullglob/dotglob don't leak into the user's shell. dotglob
+    # includes dotfiles; nullglob makes the loop empty when .shared has none.
+    (
+        shopt -s nullglob dotglob
+        local item name
+        for item in "$shared"/*; do
+            name="$(basename "$item")"
+            [ -e "$target/$name" ] && continue
+            ln -s "$item" "$target/$name"
+        done
+    )
+}
+
 _worktree_switch() {
     local branch=""
     local base=""
@@ -217,6 +243,11 @@ _worktree_switch() {
             git -C "$root" worktree add "$branch" || return 1
         fi
     fi
+
+    # Link shared config (.env.local, etc.) into the worktree. Runs every
+    # switch so worktrees created before this feature get backfilled too;
+    # it's idempotent and skips anything already present.
+    _worktree_link_shared "$root" "$target"
 
     cd "$target" || return 1
     echo "Switched to worktree '$branch' ($target)"

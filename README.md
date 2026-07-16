@@ -68,6 +68,43 @@ worktree remove feature/login
 
 The positional commands and their semantics are identical; only the option syntax follows each shell's convention.
 
+## Shared config across worktrees (`.shared/`)
+
+Files that git ignores — `.env.local`, local credentials, editor settings — don't travel between worktrees, because each worktree is its own directory and `git worktree add` never copies ignored files. That means every new branch starts without your local config.
+
+To fix this, `switch` links a **shared directory** into each worktree. Drop anything you want every branch to see into a `.shared/` folder next to the bare `.git`:
+
+```
+my-project/
+├── .git              # bare clone
+├── .shared/          # <-- shared, gitignored config lives here
+│   ├── .env.local
+│   └── config/       # folders work too
+├── main              # .env.local, config/  ->  symlinks into .shared/
+└── feature/login     # same symlinks, same source of truth
+```
+
+Every time you `worktree switch <branch>`, each entry inside `.shared/` is symlinked into that worktree by name. Edit `.shared/.env.local` once and all branches see the change instantly — there's only one real file.
+
+How it behaves:
+
+- **Files and folders both work.** A symlink is created for each top-level entry in `.shared/`, whether it's a file or a directory.
+- **Never clobbers.** If a worktree already has a file with that name, it's left untouched — the symlink is only created when nothing is there.
+- **Backfills existing worktrees.** The linking runs on *every* `switch`, not just when a worktree is first created, so worktrees made before you populated `.shared/` pick up the links the next time you switch into them.
+- **Nothing is committed.** The symlinks point at `.shared/`, which you keep gitignored; git never tracks them.
+- **Opt-in.** No `.shared/` directory means no symlinks and no change in behavior.
+
+Set it up once per repo:
+
+```bash
+cd my-project
+mkdir .shared
+mv main/.env.local .shared/.env.local   # move your real config into the shared source
+worktree switch main                     # relink main to the shared copy
+```
+
+> **Windows / PowerShell:** creating symlinks requires either [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development) enabled or running the shell elevated. Without it, the links are silently skipped.
+
 ## Notable behaviors
 
 - **All remote branches are visible.** `clone` sets `remote.origin.fetch` to `+refs/heads/*:refs/remotes/origin/*` before fetching, so every remote branch shows up — not just the default one.

@@ -155,6 +155,26 @@ function Invoke-WorktreeClone {
     Write-Host "Done. Worktree '$Branch' is ready at .\$repoName\$Branch"
 }
 
+# Symlink every entry from the repo-level shared dir into a new worktree.
+# Drop any file or folder into <root>\.shared (which lives next to the bare
+# .git) and it shows up — as a symlink — in every worktree, keeping gitignored
+# config such as .env.local as a single source of truth across all branches.
+# Handles files and directories and never clobbers something already present.
+# NOTE: creating symlinks on Windows needs Developer Mode or an elevated shell.
+function Add-WorktreeSharedLinks {
+    param([string]$Root, [string]$Target)
+
+    $shared = Join-Path $Root '.shared'
+    if (-not (Test-Path -LiteralPath $shared -PathType Container)) { return }
+
+    # -Force so dotfiles/hidden items are included.
+    Get-ChildItem -LiteralPath $shared -Force | ForEach-Object {
+        $dest = Join-Path $Target $_.Name
+        if (Test-Path -LiteralPath $dest) { return }
+        New-Item -ItemType SymbolicLink -Path $dest -Target $_.FullName -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+
 function Invoke-WorktreeSwitch {
     param(
         [string]$Branch,
@@ -206,6 +226,11 @@ function Invoke-WorktreeSwitch {
         }
         if ($LASTEXITCODE -ne 0) { return }
     }
+
+    # Link shared config (.env.local, etc.) into the worktree. Runs every
+    # switch so worktrees created before this feature get backfilled too;
+    # it's idempotent and skips anything already present.
+    Add-WorktreeSharedLinks -Root $root -Target $target
 
     Set-Location -LiteralPath $target
     Write-Host "Switched to worktree '$Branch' ($target)"
