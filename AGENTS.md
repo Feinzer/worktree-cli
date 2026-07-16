@@ -15,6 +15,7 @@ No other source, no build system, no tests, no linter, no manifest.
 - **Any behavior or flag change must be mirrored across all three files.** `worktree.sh` is canonical; port the change to `.zsh` and `.ps1`. Do not edit one without the others.
 - **Flag style is per-shell and idiomatic — do not "normalize" it.** bash/zsh use GNU long options (`--branch`, `--from`, `--force`); PowerShell uses native single-dash params (`-Branch`, `-From`, `-Force`, with `-b`/`-f` aliases). The positional commands (`clone` / `switch` / `remove` / `list`) and their semantics stay identical.
 - **Each file detects sourced-vs-executed** and registers tab-completion only when sourced (`BASH_SOURCE` / `ZSH_EVAL_CONTEXT` / `$MyInvocation.InvocationName -eq '.'`). Preserve this when refactoring the tail of each file.
+- **`shared add <path>`** moves a file/folder from a worktree into `.common/` (sibling of the bare `.git`) and symlinks it back; `switch` re-creates the symlinks in every worktree it enters. The manifest is `.common/.wt-shared` (one repo-relative path per line). Symlinks are **relative** (`../.common/<relpath>`), so the repo dir stays portable. On `switch`, a real file/folder at a shared path is **skipped with a warning**, never clobbered.
 
 ## Verifying changes
 
@@ -36,5 +37,7 @@ Repeat the equivalent in zsh (`source src/worktree.zsh`) and PowerShell (`. .\sr
 - `switch <branch>` resolves the current HEAD to a concrete commit *before* chdir to the repo root, then: DWIMs an existing local/origin branch, else creates a new branch off that HEAD (or off `--from`/`-From <base>` if given).
 - `remove` with no name targets the worktree you're in and steps out to the repo root first so the shell isn't left in a deleted path.
 - `list` filters out the bare-repo entry.
+- `shared add` resolves the path by matching the longest worktree-name prefix first (so `feature/shared-files` wins over `feature`), then falls back to the current worktree's toplevel. Absolute paths are rejected. The source must not already be a symlink, and the relpath must not already be in `.common/` or the manifest.
+- `switch` calls `_worktree_link_common` / `Invoke-WorktreeLinkCommon` after `cd`/`Set-Location`; it is idempotent (existing symlinks are left alone) and silent when no `.common/.wt-shared` exists.
 
 License: GPL-3.0 (`LICENSE`).
