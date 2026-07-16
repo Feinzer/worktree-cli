@@ -579,6 +579,11 @@ _worktree_complete() {
                 COMPREPLY=( $(compgen -W "add help" -- "$cur") )
                 return 0
             fi
+            if [ "$prev" = "add" ]; then
+                compopt -o filenames
+                COMPREPLY=( $(compgen -f -d -- "$cur") )
+                return 0
+            fi
             ;;
     esac
     return 0

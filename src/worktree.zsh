@@ -601,6 +601,10 @@ _worktree_complete() {
                 _describe -t sharedsubs 'shared subcommand' sharedsubs
                 return 0
             fi
+            if (( CURRENT >= 4 )); then
+                _files
+                return 0
+            fi
             ;;
     esac
     return 0

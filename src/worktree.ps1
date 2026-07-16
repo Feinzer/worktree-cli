@@ -557,12 +557,34 @@ $WorktreeNameCompleter = {
     }
 }
 
+# Complete the path (third positional -> -Path) for `shared add`.
+$WorktreePathCompleter = {
+    param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameter)
+    $sub = $null; $subsub = $null
+    if ($commandAst.CommandElements.Count -ge 2) { $sub = $commandAst.CommandElements[1].Extent.Text }
+    if ($commandAst.CommandElements.Count -ge 3) { $subsub = $commandAst.CommandElements[2].Extent.Text }
+    if ($sub -eq 'shared' -and $subsub -eq 'add') {
+        $dir = Split-Path -Parent $wordToComplete
+        $leaf = Split-Path -Leaf $wordToComplete
+        if ([string]::IsNullOrEmpty($dir)) { $dir = (Get-Location).Path }
+        Get-ChildItem -LiteralPath $dir -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "$leaf*" } |
+            ForEach-Object {
+                $name = $_.Name
+                if ($_.PSIsContainer) { $name += [System.IO.Path]::DirectorySeparatorChar }
+                $fullPath = Join-Path $dir $name
+                [System.Management.Automation.CompletionResult]::new($fullPath, $name, 'ParameterValue', $_.FullName)
+            }
+    }
+}
+
 # When dot-sourced (`. .\worktree.ps1`), the functions above are now available
 # in the caller's session; register tab-completion for them. When run directly
 # (`.\worktree.ps1 clone ...`), dispatch the script arguments instead.
 if ($MyInvocation.InvocationName -eq '.') {
     Register-ArgumentCompleter -CommandName worktree, wt -ParameterName Command -ScriptBlock $WorktreeCommandCompleter
     Register-ArgumentCompleter -CommandName worktree, wt -ParameterName Name -ScriptBlock $WorktreeNameCompleter
+    Register-ArgumentCompleter -CommandName worktree, wt -ParameterName Path -ScriptBlock $WorktreePathCompleter
 } else {
     worktree @args
 }
