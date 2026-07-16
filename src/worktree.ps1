@@ -40,6 +40,8 @@ Usage:
   worktree remove [<branch-name>] [-Force]            (-f alias; rm alias)
   worktree list                                       (ls alias)
   worktree shared add <path>
+  worktree shared list                          (alias: ls)
+  worktree shared remove <relpath>              (alias: rm)
 
   clone    Clone <repo-url> as a bare repo into .\.git and check out
            <main-branch> (default: the repository's default branch) as the first worktree.
@@ -50,9 +52,11 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, step out of and
            remove the worktree you're currently in.
   list     List the existing worktrees (runs `git worktree list`).
-  shared   Move <path> into a shared .common\ directory at the repo root and
-           symlink it back into the worktree. `switch` re-creates the symlinks
-           in every worktree it enters.
+  shared   Manage files shared via .common\. `add` moves a path into
+           .common\ and symlinks it back; `list` prints the shared paths;
+           `remove` deletes a shared path from .common\ and cleans up its
+           symlinks. `switch` re-creates the symlinks in every worktree
+           it enters.
 '@
 }
 
@@ -118,13 +122,21 @@ function Show-WorktreeSharedUsage {
     Write-Host @'
 Usage:
   worktree shared add <path>
+  worktree shared list                          (alias: ls)
+  worktree shared remove <relpath>              (alias: rm)
 
-  add    Move <path> into the shared .common\ directory at the repo root and
-         symlink it back into the worktree it came from. <path> may be
-         prefixed with a worktree name (e.g. 'master\node_modules') or given
-         relative to the worktree you're currently in (e.g. 'node_modules').
-         Every subsequent `worktree switch` re-creates the symlinks in the
-         worktree it enters.
+  add     Move <path> into the shared .common\ directory at the repo root and
+          symlink it back into the worktree it came from. <path> may be
+          prefixed with a worktree name (e.g. 'master\node_modules') or given
+          relative to the worktree you're currently in (e.g. 'node_modules').
+          Every subsequent `worktree switch` re-creates the symlinks in the
+          worktree it enters.
+  list    Print the repo-relative paths currently shared in .common\, one per
+          line (the contents of .common\.wt-shared).
+  remove  Delete the shared <relpath> from .common\ and remove every symlink
+          pointing to it across all worktrees. Real files/folders at the path
+          in any worktree are left untouched. Destructive: the .common copy is
+          deleted, not moved back.
 '@
 }
 
@@ -132,9 +144,13 @@ function Invoke-WorktreeShared {
     param([string]$Subcommand, [string]$Path)
 
     switch ($Subcommand) {
-        'add' { Invoke-WorktreeSharedAdd -Path $Path }
-        ''    { Show-WorktreeSharedUsage }
-        'help' { Show-WorktreeSharedUsage }
+        'add'    { Invoke-WorktreeSharedAdd -Path $Path }
+        'list'   { Invoke-WorktreeSharedList }
+        'ls'     { Invoke-WorktreeSharedList }
+        'remove' { Invoke-WorktreeSharedRemove -RelPath $Path }
+        'rm'     { Invoke-WorktreeSharedRemove -RelPath $Path }
+        ''       { Show-WorktreeSharedUsage }
+        'help'   { Show-WorktreeSharedUsage }
         default {
             Write-Error "worktree shared: unknown subcommand '$Subcommand'"
             Show-WorktreeSharedUsage
@@ -223,6 +239,108 @@ function Invoke-WorktreeSharedAdd {
     $null = New-Item -ItemType SymbolicLink -Path $source -Target $linkTarget
 
     Write-Host "Shared '$relpath' (.common/$relpath); symlinked into '$wtname'."
+}
+
+# List the repo-relative paths currently shared in .common\.wt-shared. Used by
+# `shared list` and by tab-completion for `shared remove`. Silent when not in a
+# repo or when no manifest exists.
+function Get-WorktreeSharedNames {
+    $common = git rev-parse --git-common-dir 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($common)) { return @() }
+    if (-not [System.IO.Path]::IsPathRooted($common)) {
+        $common = Join-Path (Get-Location).Path $common
+    }
+    $root = (Split-Path -Parent $common) -replace '\\', '/'
+    $manifest = Join-Path $root '.common/.wt-shared'
+    if (-not (Test-Path -LiteralPath $manifest)) { return @() }
+    $names = @()
+    foreach ($line in @(Get-Content -LiteralPath $manifest -ErrorAction SilentlyContinue)) {
+        if (-not [string]::IsNullOrEmpty($line)) { $names += $line }
+    }
+    return $names
+}
+
+function Invoke-WorktreeSharedList {
+    $root = Resolve-WorktreeRoot 'shared list'
+    if (-not $root) { return }
+
+    $manifest = Join-Path $root '.common\.wt-shared'
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        Write-Host "worktree shared list: no shared items (no .common\.wt-shared manifest)"
+        return
+    }
+
+    $count = 0
+    foreach ($line in @(Get-Content -LiteralPath $manifest)) {
+        if ([string]::IsNullOrEmpty($line)) { continue }
+        Write-Host $line
+        $count++
+    }
+    if ($count -eq 0) {
+        Write-Host "worktree shared list: manifest is empty"
+    }
+}
+
+function Invoke-WorktreeSharedRemove {
+    param([string]$RelPath)
+
+    if ([string]::IsNullOrEmpty($RelPath)) {
+        Write-Error 'worktree shared remove: missing <relpath>'
+        return
+    }
+    if ($RelPath -like '/*' -or $RelPath -like '\*') {
+        Write-Error "worktree shared remove: absolute paths are not supported; use a repo-relative path (e.g. 'node_modules')"
+        return
+    }
+    $RelPath = $RelPath.TrimStart('./').TrimEnd('/')
+
+    $root = Resolve-WorktreeRoot 'shared remove'
+    if (-not $root) { return }
+
+    $common = Join-Path $root '.common'
+    $manifest = Join-Path $common '.wt-shared'
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        Write-Error "worktree shared remove: no shared items (no .common\.wt-shared manifest)"
+        return
+    }
+
+    $existing = @(Get-Content -LiteralPath $manifest -ErrorAction SilentlyContinue)
+    if ($existing -notcontains $RelPath) {
+        Write-Error "worktree shared remove: '$RelPath' is not in the shared manifest"
+        return
+    }
+
+    # 1. Delete the real file/folder from .common\.
+    $target = Join-Path $common $RelPath
+    if (Test-Path -LiteralPath $target) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
+
+    # 2. Rewrite the manifest without the removed relpath; delete the manifest
+    #    if it's now empty.
+    $remaining = $existing | Where-Object { $_ -ne $RelPath -and -not [string]::IsNullOrEmpty($_) }
+    if ($remaining) {
+        Set-Content -LiteralPath $manifest -Value $remaining
+    } else {
+        Remove-Item -LiteralPath $manifest
+    }
+
+    # 3. Walk every worktree and remove symlinks at the shared path. Real
+    #    files/folders are left untouched.
+    $count = 0
+    foreach ($name in (Get-WorktreeNames)) {
+        if ([string]::IsNullOrEmpty($name)) { continue }
+        $link = Join-Path $root ($name + '/' + $RelPath)
+        if (Test-Path -LiteralPath $link) {
+            $item = Get-Item -LiteralPath $link -Force
+            if ($item.LinkType -eq 'SymbolicLink') {
+                Remove-Item -LiteralPath $link -Force
+                $count++
+            }
+        }
+    }
+
+    Write-Host "Removed shared '$RelPath' (deleted from .common, $count symlink(s) cleaned up)."
 }
 
 # Re-create .common/ symlinks inside a worktree after switching into it.
@@ -563,18 +681,26 @@ $WorktreePathCompleter = {
     $sub = $null; $subsub = $null
     if ($commandAst.CommandElements.Count -ge 2) { $sub = $commandAst.CommandElements[1].Extent.Text }
     if ($commandAst.CommandElements.Count -ge 3) { $subsub = $commandAst.CommandElements[2].Extent.Text }
-    if ($sub -eq 'shared' -and $subsub -eq 'add') {
-        $dir = Split-Path -Parent $wordToComplete
-        $leaf = Split-Path -Leaf $wordToComplete
-        if ([string]::IsNullOrEmpty($dir)) { $dir = (Get-Location).Path }
-        Get-ChildItem -LiteralPath $dir -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "$leaf*" } |
-            ForEach-Object {
-                $name = $_.Name
-                if ($_.PSIsContainer) { $name += [System.IO.Path]::DirectorySeparatorChar }
-                $fullPath = Join-Path $dir $name
-                [System.Management.Automation.CompletionResult]::new($fullPath, $name, 'ParameterValue', $_.FullName)
-            }
+    if ($sub -eq 'shared') {
+        if ($subsub -eq 'add') {
+            $dir = Split-Path -Parent $wordToComplete
+            $leaf = Split-Path -Leaf $wordToComplete
+            if ([string]::IsNullOrEmpty($dir)) { $dir = (Get-Location).Path }
+            Get-ChildItem -LiteralPath $dir -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$leaf*" } |
+                ForEach-Object {
+                    $name = $_.Name
+                    if ($_.PSIsContainer) { $name += [System.IO.Path]::DirectorySeparatorChar }
+                    $fullPath = Join-Path $dir $name
+                    [System.Management.Automation.CompletionResult]::new($fullPath, $name, 'ParameterValue', $_.FullName)
+                }
+        } elseif ($subsub -in @('remove', 'rm')) {
+            Get-WorktreeSharedNames |
+                Where-Object { $_ -like "$wordToComplete*" } |
+                ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                }
+        }
     }
 }
 

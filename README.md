@@ -61,6 +61,8 @@ worktree remove feature/login
 | `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). |
 | `list` (alias: `ls`) | List the existing worktrees (the bare-repo entry is filtered out). |
 | `shared add <path>` | Move `<path>` into the shared `.common/` directory at the repo root and symlink it back into the worktree it came from. `<path>` may be prefixed with a worktree name (`master/node_modules`) or given relative to the worktree you're in (`node_modules`). Every later `switch` re-creates the symlinks in the worktree it enters. |
+| `shared list` (alias: `ls`) | Print the repo-relative paths currently shared in `.common/`, one per line (the contents of `.common/.wt-shared`). |
+| `shared remove <relpath>` (alias: `rm`) | Delete the shared `<relpath>` from `.common/` and remove every symlink pointing to it across all worktrees. Real files/folders at the path in any worktree are left untouched. **Destructive** — the `.common` copy is deleted, not moved back. |
 
 ### Flag style per shell
 
@@ -91,6 +93,8 @@ symlinks in the worktree it enters.
 ```bash
 worktree shared add node_modules          # from inside a worktree
 worktree shared add master/node_modules    # from anywhere, by worktree name
+worktree shared list                       # print all shared paths
+worktree shared remove node_modules        # delete from .common, clean up symlinks
 worktree switch feature/login             # feature/login/node_modules is symlinked
 ```
 

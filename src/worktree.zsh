@@ -58,6 +58,8 @@ Usage:
   worktree remove [<branch-name>] [-f|--force]   (alias: rm)
   worktree list                                  (alias: ls)
   worktree shared add <path>
+  worktree shared list                          (alias: ls)
+  worktree shared remove <relpath>              (alias: rm)
 
   clone    Clone <repo-url> as a bare repo into ./.git and check out
            <main-branch> (default: the repository's default branch) as the first worktree.
@@ -68,9 +70,11 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, cd out of and
            remove the worktree you're currently in.
   list     List the existing worktrees (runs `git worktree list`).
-  shared   Move <path> into a shared .common/ directory at the repo root
-           and symlink it back into the worktree. `switch` re-creates
-           the symlinks in every worktree it enters.
+  shared   Manage files shared via .common/. `add` moves a path into
+           .common/ and symlinks it back; `list` prints the shared paths;
+           `remove` deletes a shared path from .common/ and cleans up its
+           symlinks. `switch` re-creates the symlinks in every worktree
+           it enters.
 EOF
 }
 
@@ -388,6 +392,12 @@ _worktree_shared() {
         add)
             _worktree_shared_add "$@"
             ;;
+        list|ls)
+            _worktree_shared_list "$@"
+            ;;
+        remove|rm)
+            _worktree_shared_remove "$@"
+            ;;
         ""|-h|--help|help)
             _worktree_shared_usage
             ;;
@@ -403,13 +413,21 @@ _worktree_shared_usage() {
     cat <<'EOF'
 Usage:
   worktree shared add <path>
+  worktree shared list                          (alias: ls)
+  worktree shared remove <relpath>              (alias: rm)
 
-  add    Move <path> into the shared .common/ directory at the repo root and
-         symlink it back into the worktree it came from. <path> may be
-         prefixed with a worktree name (e.g. 'master/node_modules') or given
-         relative to the worktree you're currently in (e.g. 'node_modules').
-         Every subsequent `worktree switch` re-creates the symlinks in the
-         worktree it enters.
+  add     Move <path> into the shared .common/ directory at the repo root and
+          symlink it back into the worktree it came from. <path> may be
+          prefixed with a worktree name (e.g. 'master/node_modules') or given
+          relative to the worktree you're currently in (e.g. 'node_modules').
+          Every subsequent `worktree switch` re-creates the symlinks in the
+          worktree it enters.
+  list    Print the repo-relative paths currently shared in .common/, one per
+          line (the contents of .common/.wt-shared).
+  remove  Delete the shared <relpath> from .common/ and remove every symlink
+          pointing to it across all worktrees. Real files/folders at the path
+          in any worktree are left untouched. Destructive: the .common copy is
+          deleted, not moved back.
 EOF
 }
 
@@ -506,6 +524,116 @@ _worktree_shared_add() {
     echo "Shared '$relpath' (.common/$relpath); symlinked into '$wtname'."
 }
 
+# List the repo-relative paths currently shared in .common/.wt-shared, one per
+# line. Used by `shared list` and by completion for `shared remove`. Silent
+# when no manifest exists.
+_worktree_shared_names() {
+    local root
+    root="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
+    root="$(dirname "$root")"
+    local manifest="$root/.common/.wt-shared"
+    [ -f "$manifest" ] || return 0
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] && printf '%s\n' "$line"
+    done < "$manifest"
+}
+
+_worktree_shared_list() {
+    if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+        _worktree_shared_usage
+        return 0
+    fi
+
+    local root
+    root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
+        echo "worktree shared list: not inside a worktree repo (no .git found)" >&2
+        return 1
+    }
+    root="$(dirname "$root")"
+
+    local manifest="$root/.common/.wt-shared"
+    if [ ! -f "$manifest" ]; then
+        echo "worktree shared list: no shared items (no .common/.wt-shared manifest)" >&2
+        return 0
+    fi
+
+    local count=0 line
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        printf '%s\n' "$line"
+        count=$((count + 1))
+    done < "$manifest"
+
+    if [ "$count" -eq 0 ]; then
+        echo "worktree shared list: manifest is empty" >&2
+    fi
+}
+
+_worktree_shared_remove() {
+    local relpath="$1"
+
+    if [ -z "$relpath" ]; then
+        echo "worktree shared remove: missing <relpath>" >&2
+        return 1
+    fi
+    if [ "${relpath#/}" != "$relpath" ]; then
+        echo "worktree shared remove: absolute paths are not supported; use a repo-relative path (e.g. 'node_modules')" >&2
+        return 1
+    fi
+    relpath="${relpath#./}"
+    relpath="${relpath%/}"
+
+    local root
+    root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
+        echo "worktree shared remove: not inside a worktree repo (no .git found)" >&2
+        return 1
+    }
+    root="$(dirname "$root")"
+
+    local common="$root/.common"
+    local manifest="$common/.wt-shared"
+    if [ ! -f "$manifest" ]; then
+        echo "worktree shared remove: no shared items (no .common/.wt-shared manifest)" >&2
+        return 1
+    fi
+    if ! grep -Fxq -- "$relpath" "$manifest" 2>/dev/null; then
+        echo "worktree shared remove: '$relpath' is not in the shared manifest" >&2
+        return 1
+    fi
+
+    # 1. Delete the real file/folder from .common/.
+    local target="$common/$relpath"
+    if [ -e "$target" ] || [ -L "$target" ]; then
+        rm -rf "$target" || return 1
+    fi
+
+    # 2. Rewrite the manifest without the removed relpath; delete the manifest
+    #    if it's now empty (so `list` reports "no shared items" next time).
+    local tmp
+    tmp="$(mktemp)" || return 1
+    grep -Fxv -- "$relpath" "$manifest" > "$tmp" 2>/dev/null
+    if [ -s "$tmp" ]; then
+        mv "$tmp" "$manifest" || { rm -f "$tmp"; return 1; }
+    else
+        rm -f "$tmp" "$manifest"
+    fi
+
+    # 3. Walk every worktree and remove symlinks at the shared path. Real
+    #    files/folders are left untouched (never clobbered).
+    local count=0 name link
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        link="$root/$name/$relpath"
+        if [ -L "$link" ]; then
+            rm -f "$link" || return 1
+            count=$((count + 1))
+        fi
+    done < <(_worktree_names)
+
+    echo "Removed shared '$relpath' (deleted from .common, $count symlink(s) cleaned up)."
+}
+
 _worktree_link_common() {
     local root="$1" branch="$2"
     local manifest="$root/.common/.wt-shared"
@@ -597,12 +725,26 @@ _worktree_complete() {
         shared)
             if (( CURRENT == 3 )); then
                 local -a sharedsubs
-                sharedsubs=('add:Move a path into .common and symlink it back')
+                sharedsubs=(
+                    'add:Move a path into .common and symlink it back'
+                    'list:List shared paths (alias: ls)'
+                    'ls:Alias for list'
+                    'remove:Delete a shared path and its symlinks (alias: rm)'
+                    'rm:Alias for remove'
+                    'help:Show usage'
+                )
                 _describe -t sharedsubs 'shared subcommand' sharedsubs
                 return 0
             fi
             if (( CURRENT >= 4 )); then
-                _files
+                local prev="${words[CURRENT-1]}"
+                if [ "$prev" = "add" ]; then
+                    _files
+                elif [ "$prev" = "remove" ] || [ "$prev" = "rm" ]; then
+                    local -a sharednames
+                    sharednames=(${(f)"$(_worktree_shared_names)"})
+                    _describe -t sharednames 'shared path' sharednames
+                fi
                 return 0
             fi
             ;;
