@@ -56,7 +56,7 @@ Usage:
   worktree list                                  (alias: ls)
 
   clone    Clone <repo-url> as a bare repo into ./.git and check out
-           <main-branch> (default: main) as the first worktree.
+           <main-branch> (default: the repository's default branch) as the first worktree.
   switch   cd into the <branch-name> worktree, creating it with
            `git worktree add` first if it doesn't exist yet. A brand-new
            branch is based on the current worktree's HEAD; use --from <base>
@@ -69,7 +69,7 @@ EOF
 
 _worktree_clone() {
     local repo_url=""
-    local main_branch="main"
+    local main_branch=""
 
     # Parse arguments: a positional repo URL plus an optional -b/--branch flag.
     while [ "$#" -gt 0 ]; do
@@ -129,6 +129,27 @@ _worktree_clone() {
 
     # 1. Clone the repo into a hidden .git folder (bare).
     git clone --bare "$repo_url" .git || return 1
+
+    # 1b. If no branch was given, ask the remote which branch its HEAD points
+    #     to (the same mechanism `git clone` uses internally).
+    if [ -z "$main_branch" ]; then
+        local symref first_line rest target
+        symref="$(git ls-remote --symref origin HEAD 2>/dev/null)"
+        first_line="${symref%%$'\n'*}"
+        case "$first_line" in
+            "ref: "*)
+                rest="${first_line#ref: }"
+                target="${rest%%$'\t'*}"
+                case "$target" in
+                    refs/heads/*) main_branch="${target#refs/heads/}" ;;
+                esac
+                ;;
+        esac
+        if [ -z "$main_branch" ]; then
+            echo "worktree clone: could not determine the repository's default branch; pass -b <branch>" >&2
+            return 1
+        fi
+    fi
 
     # 2. Fix the fetch refspec so all remote branches are visible.
     git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || return 1

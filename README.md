@@ -43,17 +43,19 @@ On Windows you can also just use the bash version under Git Bash or WSL.
 The four commands work the same across all three shells; only the flag style differs (see table below).
 
 ```bash
-worktree clone https://github.com/acme/widgets.git -b main
+worktree clone https://github.com/acme/widgets.git
 worktree switch feature/login
 worktree list
 worktree remove feature/login
 ```
 
+(The default branch is auto-detected from the remote so the `-b main` flag is only needed when you want to override it.)
+
 `wt` is an alias that behaves exactly like `worktree`.
 
 | Command | Description |
 | --- | --- |
-| `clone <repo-url> [-b <main-branch>]` | Clone `<repo-url>` as a bare repo into `./<repo>/.git` and check out `<main-branch>` (default: `main`) as the first worktree. |
+| `clone <repo-url> [-b <main-branch>]` | Clone `<repo-url>` as a bare repo into `./<repo>/.git` and check out `<main-branch>` (default: the repository's default branch, auto-detected from the remote) as the first worktree. |
 | `switch <branch-name> [--from <base>]` | `cd` into the `<branch-name>` worktree, creating it with `git worktree add` if it doesn't exist yet. A brand-new branch is based on the current worktree's HEAD; use `--from <base>` to base it elsewhere. |
 | `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). |
 | `list` (alias: `ls`) | List the existing worktrees (the bare-repo entry is filtered out). |
