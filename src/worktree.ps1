@@ -41,7 +41,7 @@ Usage:
   worktree list                                       (ls alias)
 
   clone    Clone <repo-url> as a bare repo into .\.git and check out
-           <main-branch> (default: main) as the first worktree.
+           <main-branch> (default: the repository's default branch) as the first worktree.
   switch   Set-Location into the <branch-name> worktree, creating it with
            `git worktree add` first if it doesn't exist yet. A brand-new
            branch is based on the current worktree's HEAD; use -From <base>
@@ -98,7 +98,7 @@ function Get-WorktreeNames {
 function Invoke-WorktreeClone {
     param(
         [string]$RepoUrl,
-        [string]$Branch = 'main'
+        [string]$Branch = ''
     )
 
     if ([string]::IsNullOrEmpty($RepoUrl)) {
@@ -135,6 +135,24 @@ function Invoke-WorktreeClone {
         # 1. Clone the repo into a hidden .git folder (bare).
         git clone --bare $RepoUrl .git
         if ($LASTEXITCODE -ne 0) { return }
+
+        # 1b. If no branch was given, ask the remote which branch its HEAD
+        #     points to (the same mechanism `git clone` uses internally).
+        if ([string]::IsNullOrEmpty($Branch)) {
+            $lines = git ls-remote --symref origin HEAD 2>$null
+            $symrefLine = $lines | Where-Object { $_ -like 'ref: *' } | Select-Object -First 1
+            if ($symrefLine) {
+                $rest   = $symrefLine.Substring(5)   # strip "ref: "
+                $target = ($rest -split "`t")[0]
+                if ($target -like 'refs/heads/*') {
+                    $Branch = $target -replace '^refs/heads/', ''
+                }
+            }
+            if ([string]::IsNullOrEmpty($Branch)) {
+                Write-Error "worktree clone: could not determine the repository's default branch; pass -Branch <branch>"
+                return
+            }
+        }
 
         # 2. Fix the fetch refspec so all remote branches are visible.
         git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
@@ -275,7 +293,7 @@ function worktree {
         [string]$Name,
 
         [Alias('b')]
-        [string]$Branch = 'main',
+        [string]$Branch = '',
 
         # Base branch/commit for a new branch created by `switch`.
         [string]$From,
@@ -317,7 +335,7 @@ function wt {
         [string]$Name,
 
         [Alias('b')]
-        [string]$Branch = 'main',
+        [string]$Branch = '',
 
         [string]$From,
 
