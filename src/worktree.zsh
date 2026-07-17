@@ -316,18 +316,24 @@ _worktree_remove() {
     fi
 
     # If the current directory is inside the worktree being removed, step out
-    # to the repo root first so we don't strand the shell in a deleted path.
+    # to the repo root first so the worktree can be removed. If removal fails,
+    # step back so the user isn't left stranded at the repo root.
+    local was_inside=false
     case "$PWD/" in
         "$target"/*)
             cd "$root" || return 1
+            was_inside=true
             ;;
     esac
 
     if [ "$force" = true ]; then
-        git -C "$root" worktree remove --force "$branch" || return 1
+        git -C "$root" worktree remove --force "$branch"
     else
-        git -C "$root" worktree remove "$branch" || return 1
-    fi
+        git -C "$root" worktree remove "$branch"
+    fi || {
+        [ "$was_inside" = true ] && cd "$target" 2>/dev/null
+        return 1
+    }
     echo "Removed worktree '$branch' ($target)"
 }
 
