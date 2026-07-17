@@ -538,10 +538,12 @@ function Invoke-WorktreeRemove {
     }
 
     # If the current directory is inside the worktree being removed, step out
-    # to the repo root first so we don't strand the shell in a deleted path.
+    # to the repo root first so the worktree can be removed. If removal fails,
+    # step back so the user isn't left stranded at the repo root.
     $cur = (Get-Location).Path -replace '\\', '/'
     $tgt = ((Resolve-Path -LiteralPath $target).Path) -replace '\\', '/'
-    if ($cur -eq $tgt -or $cur.StartsWith($tgt + '/')) {
+    $wasInside = $cur -eq $tgt -or $cur.StartsWith($tgt + '/')
+    if ($wasInside) {
         Set-Location -LiteralPath $root
     }
 
@@ -550,7 +552,10 @@ function Invoke-WorktreeRemove {
     } else {
         git -C $root worktree remove $Branch
     }
-    if ($LASTEXITCODE -ne 0) { return }
+    if ($LASTEXITCODE -ne 0) {
+        if ($wasInside) { Set-Location -LiteralPath $target }
+        return
+    }
     Write-Host "Removed worktree '$Branch' ($target)"
 }
 
