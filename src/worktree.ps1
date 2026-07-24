@@ -50,7 +50,8 @@ Usage:
            branch is based on the current worktree's HEAD; use -From <base>
            to base it on another branch/commit instead.
   remove   Remove the <branch-name> worktree. With no name, step out of and
-           remove the worktree you're currently in.
+           remove the worktree you're currently in. Empty parent dirs left
+           by a nested name (fix\ after fix/login) are pruned.
   list     List the existing worktrees (runs `git worktree list`).
   shared   Manage files shared via .wt\shared\. `add` moves a path into
            .wt\shared\ and symlinks it back; `list` prints the shared paths;
@@ -528,6 +529,29 @@ function Invoke-WorktreeSwitch {
     Write-Host "Switched to worktree '$Branch' ($target)"
 }
 
+# Prune the empty parent dirs a nested worktree leaves behind.
+# `fix/nested-branches` lives in `<Root>\fix\`, so once it is gone `fix\` may be
+# an empty leftover. Walk up from the worktree's parent toward <Root>, deleting
+# while empty; the first non-empty dir stops the walk. <Root> is never a
+# candidate (the loop ends before it).
+function Remove-WorktreeEmptyParents {
+    param([string]$Root, [string]$Branch)
+
+    $rel = ($Branch -replace '\\', '/').Trim('/')
+    if ($rel -notmatch '/') { return }   # flat name — no parent dir of ours to prune
+
+    $parts = @($rel -split '/' | Where-Object { $_ })
+    for ($i = $parts.Count - 1; $i -gt 0; $i--) {
+        $sub = ($parts[0..($i - 1)] -join '/')
+        $path = Join-Path $Root $sub
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) { return }
+        if (@(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue).Count -gt 0) { return }
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $path) { return }
+        Write-Host "Removed empty parent directory '$sub' ($path)"
+    }
+}
+
 function Invoke-WorktreeRemove {
     param(
         [string]$Branch,
@@ -546,7 +570,14 @@ function Invoke-WorktreeRemove {
             return
         }
         $target = $top
-        $Branch = Split-Path -Leaf $top
+        # Nested worktrees need the full <root>-relative name ('fix/x', not 'x').
+        $rootNorm = $root -replace '\\', '/'
+        $topNorm = $top -replace '\\', '/'
+        if ($topNorm.StartsWith($rootNorm + '/')) {
+            $Branch = $topNorm.Substring($rootNorm.Length + 1)
+        } else {
+            $Branch = Split-Path -Leaf $top
+        }
     }
 
     if (-not (Test-Path -LiteralPath $target -PathType Container)) {
@@ -571,6 +602,7 @@ function Invoke-WorktreeRemove {
         return
     }
     Write-Host "Removed worktree '$Branch' ($target)"
+    Remove-WorktreeEmptyParents -Root $root -Branch $Branch
 }
 
 function Invoke-WorktreeList {

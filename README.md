@@ -61,7 +61,7 @@ worktree remove feature/login
 | --- | --- |
 | `clone <repo-url> [-b <main-branch>]` | Clone `<repo-url>` as a bare repo into `./<repo>/.git` and check out `<main-branch>` (default: the repository's default branch, auto-detected from the remote) as the first worktree. |
 | `switch <branch-name> [--from <base>]` | `cd` into the `<branch-name>` worktree, creating it with `git worktree add` if it doesn't exist yet. A brand-new branch is based on the current worktree's HEAD; use `--from <base>` to base it elsewhere. After entering, any shared items are symlinked in (unless disabled via config). |
-| `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). |
+| `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). Empty parent directories left behind by a slash-separated name (`fix/` after removing `fix/login`) are cleaned up. |
 | `list` (alias: `ls`) | List the existing worktrees (the bare-repo entry is filtered out). |
 | `shared add <path>` | Move `<path>` into the shared `.wt/shared/` directory at the repo root and symlink it back into the worktree it came from. `<path>` may be prefixed with a worktree name (`master/node_modules`) or given relative to the worktree you're in (`node_modules`). Every later `switch` re-creates the symlinks in the worktree it enters. |
 | `shared list` (alias: `ls`) | Print the repo-relative paths currently shared in `.wt/shared/`, one per line (the contents of `.wt/manifest`). |
@@ -82,6 +82,7 @@ The positional commands and their semantics are identical; only the option synta
 - **All remote branches are visible.** `clone` sets `remote.origin.fetch` to `+refs/heads/*:refs/remotes/origin/*` before fetching, so every remote branch shows up — not just the default one.
 - **`switch` is DWIM-friendly.** If the branch already exists locally or on `origin`, it's checked out as a worktree. If it's brand-new, it's created off the current worktree's HEAD (the current commit is resolved *before* changing directories, so it reflects where you are, not the bare repo's default branch), or off `--from`/`-From` when given.
 - **`remove` won't strand your shell.** With no name it targets the worktree you're in and steps out to the repo root before deleting.
+- **`remove` cleans up nested parent directories.** A branch like `fix/login` lives at `<repo>/fix/login`, so removing it can leave an empty `fix/` behind. `remove` walks up from the worktree's parent toward the repo root and deletes each directory that is empty, stopping at the first one that still holds something — a sibling worktree (`fix/other`) or any stray file keeps the parent. Nothing but empty directories is ever deleted, and the repo root itself is never touched.
 - **`list` hides the bare repo.** The bare `.git` entry is filtered out; only real worktrees are shown.
 
 ## Shared files
