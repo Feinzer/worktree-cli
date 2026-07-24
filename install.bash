@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# install.sh — install the bash implementation of `worktree` (alias `wt`).
+# install.bash — install the bash implementation of `worktree` (alias `wt`).
 #
 # Copies src/worktree.sh to $HOME/.local/lib/worktree/worktree.sh, replacing
 # any previous copy. With -s/--source it also appends the `source` line to
 # ~/.bashrc; otherwise it just prints the line for you to add.
 #
 # Usage:
-#   ./install.sh [--prefix <dir>] [-s|--source] [--dry-run] [-h|--help]
+#   ./install.bash [--prefix <dir>] [-s|--source] [--dry-run] [-h|--help]
 #
 # Environment:
 #   WORKTREE_PREFIX   same as --prefix (default: $HOME/.local/lib/worktree)
@@ -17,7 +17,7 @@ set -euo pipefail
 readonly SHELL_NAME="bash"
 readonly SOURCE_FILE="src/worktree.sh"
 readonly RC_FILE="$HOME/.bashrc"
-readonly RC_MARKER="# worktree (wt) — added by install.sh"
+readonly RC_MARKER="# worktree (wt) — added by install.bash"
 
 PREFIX="${WORKTREE_PREFIX:-$HOME/.local/lib/worktree}"
 DRY_RUN=0
@@ -25,10 +25,10 @@ APPEND_SOURCE=0
 
 _usage() {
     cat <<'EOF'
-install.sh — install the bash implementation of `worktree` (alias `wt`).
+install.bash — install the bash implementation of `worktree` (alias `wt`).
 
 Usage:
-  ./install.sh [options]
+  ./install.bash [options]
 
 Options:
   --prefix <dir>   Install directory (default: $HOME/.local/lib/worktree)
@@ -43,7 +43,7 @@ EOF
 }
 
 _die() {
-    printf 'install.sh: %s\n' "$1" >&2
+    printf 'install.bash: %s\n' "$1" >&2
     exit 1
 }
 
@@ -109,7 +109,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Resolve the repo root from this script's location so it can be run from
-# anywhere (./install.sh, bash /path/to/install.sh, a symlink on PATH).
+# anywhere (./install.bash, bash /path/to/install.bash, a symlink on PATH).
 script_path="${BASH_SOURCE[0]}"
 while [ -L "$script_path" ]; do
     link_target="$(readlink "$script_path")"
