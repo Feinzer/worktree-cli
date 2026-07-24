@@ -23,12 +23,41 @@ Switching branches no longer thrashes your working tree — each branch lives in
 
 ## Install
 
-Clone this repository somewhere permanent, then source the file for your shell from your profile so `worktree`, `wt`, and tab-completion load in every session.
+### bash — `install.bash`
 
-**bash** — add to `~/.bashrc`:
+Clone the repository and run the installer. **It installs the bash version only** —
+zsh and PowerShell are installed manually for now (see below).
+
 ```bash
-source /path/to/worktree/src/worktree.sh
+git clone https://github.com/Feinzer/worktree-cli.git
+cd worktree-cli
+./install.bash --source
 ```
+
+It copies `src/worktree.sh` to `$HOME/.local/lib/worktree/worktree.sh` (replacing
+any previous copy) and, with `--source`, appends the `source` line to `~/.bashrc`.
+Then reload your shell:
+
+```bash
+source ~/.bashrc
+```
+
+Re-run it any time to upgrade — pull the repo and run `./install.bash` again. The
+installed copy is replaced in place, and the `~/.bashrc` line is left alone if
+it's already there.
+
+| Option | Description |
+| --- | --- |
+| `-s`, `--source` | Append `source <prefix>/worktree.sh` to `~/.bashrc`. Skipped if that path is already sourced there, so re-running never duplicates the line. Without this flag the installer just prints the line for you to add yourself. |
+| `--prefix <dir>` | Install directory (default: `$HOME/.local/lib/worktree`). Also settable via the `WORKTREE_PREFIX` environment variable. |
+| `--dry-run` | Print every action — the copy and the `~/.bashrc` append — without touching the filesystem. |
+| `-h`, `--help` | Show usage. |
+
+### zsh and PowerShell — manual
+
+There is no installer for these yet. Clone the repository somewhere permanent and
+source the file for your shell from your profile, so `worktree`, `wt`, and
+tab-completion load in every session.
 
 **zsh** — add to `~/.zshrc`:
 ```zsh
@@ -41,6 +70,9 @@ source /path/to/worktree/src/worktree.zsh
 ```
 
 On Windows you can also just use the bash version under Git Bash or WSL.
+
+Sourcing `src/worktree.sh` directly from a clone works the same way for bash, if
+you'd rather not install into `~/.local/lib`.
 
 ## Usage
 

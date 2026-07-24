@@ -7,12 +7,25 @@
 - `src/worktree.sh` — **bash, the reference implementation.** Treat as source of truth.
 - `src/worktree.zsh` — zsh port (`ZSH_EVAL_CONTEXT`, `compdef` / `_describe` / `_arguments`).
 - `src/worktree.ps1` — PowerShell 5.1 & 7+ port (native functions, `Register-ArgumentCompleter`).
+- `install.bash` — **installer for the bash implementation only.** Copies `src/worktree.sh` to `$HOME/.local/lib/worktree/worktree.sh`.
 
 No other source, no build system, no tests, no linter, no manifest.
 
+## The installer (`install.bash`)
+
+- **Bash only, deliberately.** It installs `src/worktree.sh` and touches `~/.bashrc` and nothing else. zsh and PowerShell installers are **not written yet**; the README documents manual sourcing for those two. Do not teach `install.bash` about the other shells — when they get installers they get sibling scripts (`install.zsh`, `install.ps1`), which is why the file is named `.bash` rather than `.sh`.
+- **Layout it owns:** installs to `$PREFIX/worktree.sh` where `PREFIX` defaults to `$HOME/.local/lib/worktree` (overridable by `--prefix` or `$WORKTREE_PREFIX`). Mode `755`, since `worktree.sh` also supports direct execution.
+- **Flags:** `--prefix <dir>` (also `--prefix=<dir>`), `-s`/`--source`, `--dry-run`, `-h`/`--help`. Unknown flags are a hard error.
+- **`-s`/`--source` appends to `~/.bashrc`**, preceded by the `RC_MARKER` comment. It is **idempotent via a `grep -qF` on the destination path** (not on the marker) — so renaming the marker is safe, but changing that check is not. Appending terminates an unterminated last line first, then adds one blank separator line, and creates the rc file if absent.
+- **`--dry-run` must stay total:** every filesystem action goes through `_run` or the dry-run branch of `_append_to_rc`. A new side effect that bypasses those breaks the contract.
+- **The repo root is resolved from `BASH_SOURCE` with a symlink-following loop**, not from `$PWD`, so the installer works from any cwd or via a symlink on `PATH`. Keep that if you move the file.
+- **It refuses to replace a non-regular file** at the destination; a regular file is replaced silently (that's the upgrade path).
+- Verify with `./install.bash --dry-run`, and end-to-end against a throwaway `HOME`/`--prefix` (`HOME=/tmp/x ./install.bash -s --prefix /tmp/x/lib`) — never against your real `~/.bashrc`.
+
 ## Critical conventions
 
-- **Any behavior or flag change must be mirrored across all three files.** `worktree.sh` is canonical; port the change to `.zsh` and `.ps1`. Do not edit one without the others.
+- **Any behavior or flag change must be mirrored across all three files.** `worktree.sh` is canonical; port the change to `.zsh` and `.ps1`. Do not edit one without the others. (This rule is about `src/` — `install.bash` has no siblings to mirror yet.)
+- **If you rename or move `src/worktree.sh`, update `install.bash`.** Its `SOURCE_FILE` constant hardcodes the repo-relative path, and the installed filename is what users have in their `~/.bashrc`.
 - **Flag style is per-shell and idiomatic — do not "normalize" it.** bash/zsh use GNU long options (`--branch`, `--from`, `--force`); PowerShell uses native single-dash params (`-Branch`, `-From`, `-Force`, with `-b`/`-f` aliases). The positional commands (`clone` / `switch` / `remove` / `list`) and their semantics stay identical.
 - **Each file detects sourced-vs-executed** and registers tab-completion only when sourced (`BASH_SOURCE` / `ZSH_EVAL_CONTEXT` / `$MyInvocation.InvocationName -eq '.'`). Preserve this when refactoring the tail of each file.
 - **The `.wt/` layout.** All tool-owned data lives under `<repo>/.wt/` (sibling of the bare `.git`), outside every worktree so git never tracks it:
