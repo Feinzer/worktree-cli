@@ -70,19 +70,87 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, cd out of and
            remove the worktree you're currently in.
   list     List the existing worktrees (runs `git worktree list`).
-  shared   Manage files shared via .shared/. `add` moves a path into
-           .shared/ and symlinks it back; `list` prints the shared paths;
-           `remove` deletes a shared path from .shared/ and cleans up its
+  shared   Manage files shared via .wt/shared/. `add` moves a path into
+           .wt/shared/ and symlinks it back; `list` prints the shared paths;
+           `remove` deletes a shared path from .wt/shared/ and cleans up its
            symlinks. `switch` re-creates the symlinks in every worktree
            it enters.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Path-resolution helpers — the .wt/ layout is defined here, in one place.
+# ---------------------------------------------------------------------------
+
+_worktree_root() {
+    local common
+    common="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+    dirname "$common"
+}
+
+_worktree_wt_dir() {
+    local root
+    root="$(_worktree_root)" || return 1
+    printf '%s/.wt' "$root"
+}
+
+_worktree_shared_dir() {
+    local root
+    root="$(_worktree_root)" || return 1
+    printf '%s/.wt/shared' "$root"
+}
+
+_worktree_manifest() {
+    local root
+    root="$(_worktree_root)" || return 1
+    printf '%s/.wt/manifest' "$root"
+}
+
+_worktree_config() {
+    local root
+    root="$(_worktree_root)" || return 1
+    printf '%s/.wt/config' "$root"
+}
+
+_worktree_config_get() {
+    local section="$1" key="$2" default="${3:-}"
+    local config
+    config="$(_worktree_config 2>/dev/null)" || { printf '%s' "$default"; return 0; }
+    [ -f "$config" ] || { printf '%s' "$default"; return 0; }
+
+    local cur_section="" line k v
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        case "$line" in
+            '['*']')
+                cur_section="${line#"["}"
+                cur_section="${cur_section%"]"}"
+                continue
+                ;;
+        esac
+        case "$line" in
+            *=*)
+                k="${line%%=*}"
+                v="${line#*=}"
+                k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+                v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+                if [ "$cur_section" = "$section" ] && [ "$k" = "$key" ]; then
+                    printf '%s' "$v"
+                    return 0
+                fi
+                ;;
+        esac
+    done < "$config"
+    printf '%s' "$default"
 }
 
 _worktree_clone() {
     local repo_url=""
     local main_branch=""
 
-    # Parse arguments: a positional repo URL plus an optional -b/--branch flag.
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -b|--branch)
@@ -118,7 +186,6 @@ _worktree_clone() {
         return 1
     fi
 
-    # Derive the repo name from the URL (strip trailing slash and .git suffix).
     local repo_name
     repo_name="${repo_url%/}"
     repo_name="${repo_name##*/}"
@@ -134,15 +201,11 @@ _worktree_clone() {
         return 1
     fi
 
-    # Create the repo directory and work inside it.
     mkdir -p "$repo_name" || return 1
     cd "$repo_name" || return 1
 
-    # 1. Clone the repo into a hidden .git folder (bare).
     git clone --bare "$repo_url" .git || return 1
 
-    # 1b. If no branch was given, ask the remote which branch its HEAD points
-    #     to (the same mechanism `git clone` uses internally).
     if [ -z "$main_branch" ]; then
         local symref first_line rest target
         symref="$(git ls-remote --symref origin HEAD 2>/dev/null)"
@@ -162,16 +225,9 @@ _worktree_clone() {
         fi
     fi
 
-    # 2. Fix the fetch refspec so all remote branches are visible.
     git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || return 1
-
-    # Populate the remote-tracking refs we just enabled.
     git fetch origin || return 1
-
-    # 3. Create the first worktree for the main branch.
     git worktree add "$main_branch" || return 1
-
-    # 4. Get the user back out of the repo
     cd ..
 
     echo "Done. Worktree '$main_branch' is ready at ./$repo_name/$main_branch"
@@ -182,7 +238,6 @@ _worktree_switch() {
     local base=""
     local have_base=false
 
-    # Parse arguments: a positional branch name plus an optional --from <base>.
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --from)
@@ -218,15 +273,10 @@ _worktree_switch() {
         return 1
     fi
 
-    # Default base for a brand-new branch: the HEAD of the worktree we're
-    # currently standing in. Resolve it to a concrete commit *before* we chdir
-    # to the repo root, otherwise HEAD would mean the bare repo's default branch
-    # rather than where the user is.
     if [ "$have_base" = false ]; then
         base="$(git rev-parse HEAD 2>/dev/null)"
     fi
 
-    # Resolve the repo root: the directory that contains the bare .git dir.
     local root
     root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
         echo "worktree switch: not inside a worktree repo (no .git found)" >&2
@@ -236,21 +286,15 @@ _worktree_switch() {
 
     local target="$root/$branch"
 
-    # Create the worktree only if the folder isn't there yet.
     if [ ! -d "$target" ]; then
         if [ "$have_base" = true ]; then
-            # Explicit --from: always create a new branch off the given base.
             git -C "$root" worktree add -b "$branch" "$branch" "$base" || return 1
         elif git -C "$root" show-ref --verify --quiet "refs/heads/$branch" \
              || git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-            # Branch already exists locally or on origin: let git DWIM (check it
-            # out / create a tracking branch). The base doesn't apply here.
             git -C "$root" worktree add "$branch" || return 1
         elif [ -n "$base" ]; then
-            # Brand-new branch, based on the current worktree's HEAD.
             git -C "$root" worktree add -b "$branch" "$branch" "$base" || return 1
         else
-            # No current HEAD to base on: fall back to git's default.
             git -C "$root" worktree add "$branch" || return 1
         fi
     fi
@@ -264,7 +308,6 @@ _worktree_remove() {
     local branch=""
     local force=false
 
-    # Parse arguments: an optional branch name plus an optional -f/--force flag.
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -f|--force)
@@ -290,7 +333,6 @@ _worktree_remove() {
         esac
     done
 
-    # Resolve the repo root: the directory that contains the bare .git dir.
     local root
     root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
         echo "worktree remove: not inside a worktree repo (no .git found)" >&2
@@ -302,7 +344,6 @@ _worktree_remove() {
     if [ -n "$branch" ]; then
         target="$root/$branch"
     else
-        # No branch given: target the worktree we're currently sitting in.
         target="$(git rev-parse --show-toplevel 2>/dev/null)" || {
             echo "worktree remove: no <branch-name> and not inside a worktree" >&2
             return 1
@@ -315,9 +356,6 @@ _worktree_remove() {
         return 1
     fi
 
-    # If the current directory is inside the worktree being removed, step out
-    # to the repo root first so the worktree can be removed. If removal fails,
-    # step back so the user isn't left stranded at the repo root.
     local was_inside=false
     case "$PWD/" in
         "$target"/*)
@@ -343,7 +381,6 @@ _worktree_list() {
         return 0
     fi
 
-    # Resolve the repo root: the directory that contains the bare .git dir.
     local root
     root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
         echo "worktree list: not inside a worktree repo (no .git found)" >&2
@@ -351,12 +388,9 @@ _worktree_list() {
     }
     root="$(dirname "$root")"
 
-    # Drop the bare repo entry; only real worktrees are useful here.
     git -C "$root" worktree list "$@" | grep -v '(bare)$'
 }
 
-# List the branch names of existing worktrees, one per line. Used by the
-# completion function to suggest arguments for `switch` and `remove`.
 _worktree_names() {
     local root line path
     root="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
@@ -366,8 +400,6 @@ _worktree_names() {
         case "$line" in
             "worktree "*)
                 path="${line#worktree }"
-                # Only report worktrees living under the repo root, and print
-                # them relative to it so nested names (e.g. feature/foo) survive.
                 case "$path" in
                     "$root"/*) printf '%s\n' "${path#"$root"/}" ;;
                 esac
@@ -376,7 +408,6 @@ _worktree_names() {
     done < <(git -C "$root" worktree list --porcelain 2>/dev/null)
 }
 
-# List local and origin branch names, for completing `switch --from <base>`.
 _worktree_branches() {
     local root
     root="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
@@ -386,8 +417,8 @@ _worktree_branches() {
 }
 
 # ---------------------------------------------------------------------------
-# shared — keep selected files/folders in .shared/ and symlink them into every
-# worktree on `switch`.
+# shared — keep selected files/folders in .wt/shared/ and symlink them into
+# every worktree on `switch`.
 # ---------------------------------------------------------------------------
 
 _worktree_shared() {
@@ -422,18 +453,18 @@ Usage:
   worktree shared list                          (alias: ls)
   worktree shared remove <relpath>              (alias: rm)
 
-  add     Move <path> into the shared .shared/ directory at the repo root and
-          symlink it back into the worktree it came from. <path> may be
+  add     Move <path> into the shared .wt/shared/ directory at the repo root
+          and symlink it back into the worktree it came from. <path> may be
           prefixed with a worktree name (e.g. 'master/node_modules') or given
           relative to the worktree you're currently in (e.g. 'node_modules').
           Every subsequent `worktree switch` re-creates the symlinks in the
           worktree it enters.
-  list    Print the repo-relative paths currently shared in .shared/, one per
-          line (the contents of .shared/.manifest).
-  remove  Delete the shared <relpath> from .shared/ and remove every symlink
+  list    Print the repo-relative paths currently shared in .wt/shared/, one per
+          line (the contents of .wt/manifest).
+  remove  Delete the shared <relpath> from .wt/shared/ and remove every symlink
           pointing to it across all worktrees. Real files/folders at the path
-          in any worktree are left untouched. Destructive: the .shared copy is
-          deleted, not moved back.
+          in any worktree are left untouched. Destructive: the .wt/shared copy
+          is deleted, not moved back.
 EOF
 }
 
@@ -448,7 +479,7 @@ _worktree_common_target() {
     local ups=""
     local i
     for ((i = 0; i < depth; i++)); do ups+="../"; done
-    printf '%s.shared/%s' "$ups" "$relpath"
+    printf '%s.wt/shared/%s' "$ups" "$relpath"
 }
 
 _worktree_shared_add() {
@@ -472,8 +503,8 @@ _worktree_shared_add() {
     }
     root="$(dirname "$root")"
 
-    local common="$root/.shared"
-    local manifest="$common/.manifest"
+    local shared_dir="$root/.wt/shared"
+    local manifest="$root/.wt/manifest"
 
     local wtname="" relpath=""
     local sorted
@@ -510,9 +541,9 @@ _worktree_shared_add() {
         return 1
     fi
 
-    local dest="$common/$relpath"
+    local dest="$shared_dir/$relpath"
     if [ -e "$dest" ] || [ -L "$dest" ]; then
-        echo "worktree shared add: '$relpath' is already shared (.shared/$relpath exists)" >&2
+        echo "worktree shared add: '$relpath' is already shared (.wt/shared/$relpath exists)" >&2
         return 1
     fi
     if [ -f "$manifest" ] && grep -Fxq -- "$relpath" "$manifest" 2>/dev/null; then
@@ -527,17 +558,12 @@ _worktree_shared_add() {
     printf '%s\n' "$relpath" >> "$manifest" || return 1
     ln -s "$(_worktree_common_target "$wtname" "$relpath")" "$source" || return 1
 
-    echo "Shared '$relpath' (.shared/$relpath); symlinked into '$wtname'."
+    echo "Shared '$relpath' (.wt/shared/$relpath); symlinked into '$wtname'."
 }
 
-# List the repo-relative paths currently shared in .shared/.manifest, one per
-# line. Used by `shared list` and by completion for `shared remove`. Silent
-# when no manifest exists.
 _worktree_shared_names() {
-    local root
-    root="$(git rev-parse --git-common-dir 2>/dev/null)" || return 0
-    root="$(dirname "$root")"
-    local manifest="$root/.shared/.manifest"
+    local manifest
+    manifest="$(_worktree_manifest 2>/dev/null)" || return 0
     [ -f "$manifest" ] || return 0
     local line
     while IFS= read -r line; do
@@ -551,16 +577,14 @@ _worktree_shared_list() {
         return 0
     fi
 
-    local root
-    root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
+    local manifest
+    manifest="$(_worktree_manifest 2>/dev/null)" || {
         echo "worktree shared list: not inside a worktree repo (no .git found)" >&2
         return 1
     }
-    root="$(dirname "$root")"
 
-    local manifest="$root/.shared/.manifest"
     if [ ! -f "$manifest" ]; then
-        echo "worktree shared list: no shared items (no .shared/.manifest manifest)" >&2
+        echo "worktree shared list: no shared items (no .wt/manifest manifest)" >&2
         return 0
     fi
 
@@ -597,10 +621,10 @@ _worktree_shared_remove() {
     }
     root="$(dirname "$root")"
 
-    local common="$root/.shared"
-    local manifest="$common/.manifest"
+    local shared_dir="$root/.wt/shared"
+    local manifest="$root/.wt/manifest"
     if [ ! -f "$manifest" ]; then
-        echo "worktree shared remove: no shared items (no .shared/.manifest manifest)" >&2
+        echo "worktree shared remove: no shared items (no .wt/manifest manifest)" >&2
         return 1
     fi
     if ! grep -Fxq -- "$relpath" "$manifest" 2>/dev/null; then
@@ -608,14 +632,11 @@ _worktree_shared_remove() {
         return 1
     fi
 
-    # 1. Delete the real file/folder from .shared/.
-    local target="$common/$relpath"
+    local target="$shared_dir/$relpath"
     if [ -e "$target" ] || [ -L "$target" ]; then
         rm -rf "$target" || return 1
     fi
 
-    # 2. Rewrite the manifest without the removed relpath; delete the manifest
-    #    if it's now empty (so `list` reports "no shared items" next time).
     local tmp
     tmp="$(mktemp)" || return 1
     grep -Fxv -- "$relpath" "$manifest" > "$tmp" 2>/dev/null
@@ -625,8 +646,6 @@ _worktree_shared_remove() {
         rm -f "$tmp" "$manifest"
     fi
 
-    # 3. Walk every worktree and remove symlinks at the shared path. Real
-    #    files/folders are left untouched (never clobbered).
     local count=0 name link
     while IFS= read -r name; do
         [ -z "$name" ] && continue
@@ -637,13 +656,19 @@ _worktree_shared_remove() {
         fi
     done < <(_worktree_names)
 
-    echo "Removed shared '$relpath' (deleted from .shared, $count symlink(s) cleaned up)."
+    echo "Removed shared '$relpath' (deleted from .wt/shared, $count symlink(s) cleaned up)."
 }
 
 _worktree_link_common() {
     local root="$1" branch="$2"
-    local manifest="$root/.shared/.manifest"
+    local manifest="$root/.wt/manifest"
     [ -f "$manifest" ] || return 0
+
+    local auto_link
+    auto_link="$(_worktree_config_get shared auto_link true)"
+    case "$auto_link" in
+        false|0|no|off) return 0 ;;
+    esac
 
     local relpath link target
     local count=0 skipped=0
@@ -669,12 +694,10 @@ _worktree_link_common() {
     fi
 }
 
-# Programmable completion for the `worktree` shell function (zsh style).
 _worktree_complete() {
     local -a subcmds names
     local cmd
 
-    # First word after `worktree`: complete the subcommand.
     if (( CURRENT == 2 )); then
         subcmds=(
             'clone:Clone a repo as a bare repo + first worktree'
@@ -683,7 +706,7 @@ _worktree_complete() {
             'rm:Alias for remove'
             'list:List the existing worktrees'
             'ls:Alias for list'
-            'shared:Manage shared (.shared) files'
+            'shared:Manage shared (.wt/shared) files'
             'help:Show usage'
         )
         _describe -t commands 'worktree command' subcmds
@@ -693,7 +716,6 @@ _worktree_complete() {
     cmd="${words[2]}"
     case "$cmd" in
         clone)
-            # -b/--branch takes a free-form branch name we can't predict.
             if [ "${words[CURRENT-1]}" = "-b" ] || [ "${words[CURRENT-1]}" = "--branch" ]; then
                 return 0
             fi
@@ -702,7 +724,6 @@ _worktree_complete() {
                 '(-h --help)'{-h,--help}'[show usage]'
             ;;
         switch)
-            # After --from, complete with branch/ref names for the base.
             if [ "${words[CURRENT-1]}" = "--from" ]; then
                 local branches
                 branches=(${(f)"$(_worktree_branches)"})
@@ -732,7 +753,7 @@ _worktree_complete() {
             if (( CURRENT == 3 )); then
                 local -a sharedsubs
                 sharedsubs=(
-                    'add:Move a path into .shared and symlink it back'
+                    'add:Move a path into .wt/shared and symlink it back'
                     'list:List shared paths (alias: ls)'
                     'ls:Alias for list'
                     'remove:Delete a shared path and its symlinks (alias: rm)'
@@ -758,17 +779,11 @@ _worktree_complete() {
     return 0
 }
 
-# Short alias: `wt` behaves exactly like `worktree`.
 wt() {
     worktree "$@"
 }
 
-# If executed directly (not sourced), dispatch to the function. When sourced,
-# register the completion so `worktree <TAB>` (and `wt <TAB>`) work in
-# interactive shells. In zsh, ZSH_EVAL_CONTEXT ends in ":file" while a file is
-# being sourced and is just "toplevel" for a script run as `zsh worktree.zsh`.
 if [[ "$ZSH_EVAL_CONTEXT" == *:file* ]]; then
-    # Make sure the completion system is initialised before registering.
     if ! whence compdef >/dev/null 2>&1; then
         autoload -Uz compinit && compinit
     fi

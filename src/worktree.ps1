@@ -52,16 +52,14 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, step out of and
            remove the worktree you're currently in.
   list     List the existing worktrees (runs `git worktree list`).
-  shared   Manage files shared via .shared\. `add` moves a path into
-           .shared\ and symlinks it back; `list` prints the shared paths;
-           `remove` deletes a shared path from .shared\ and cleans up its
+  shared   Manage files shared via .wt\shared\. `add` moves a path into
+           .wt\shared\ and symlinks it back; `list` prints the shared paths;
+           `remove` deletes a shared path from .wt\shared\ and cleans up its
            symlinks. `switch` re-creates the symlinks in every worktree
            it enters.
 '@
 }
 
-# Resolve the repo root: the directory that contains the bare .git dir.
-# Returns $null (and writes an error under $Context) when not in a worktree.
 function Resolve-WorktreeRoot {
     param([string]$Context)
 
@@ -70,15 +68,68 @@ function Resolve-WorktreeRoot {
         Write-Error "worktree ${Context}: not inside a worktree repo (no .git found)"
         return $null
     }
-    # git may return a relative path (e.g. ".git"); make it absolute first.
     if (-not [System.IO.Path]::IsPathRooted($common)) {
         $common = Join-Path (Get-Location).Path $common
     }
     return (Split-Path -Parent $common)
 }
 
-# List the branch names of existing worktrees. Used by tab-completion to
-# suggest arguments for `switch` and `remove`. Stays silent when not in a repo.
+# ---------------------------------------------------------------------------
+# Path-resolution helpers — the .wt/ layout is defined here, in one place.
+# ---------------------------------------------------------------------------
+
+function Get-WorktreeWtDir {
+    param([string]$Root)
+    return (Join-Path $Root '.wt')
+}
+
+function Get-WorktreeSharedDir {
+    param([string]$Root)
+    return (Join-Path $Root '.wt\shared')
+}
+
+function Get-WorktreeManifest {
+    param([string]$Root)
+    return (Join-Path $Root '.wt\manifest')
+}
+
+function Get-WorktreeConfig {
+    param([string]$Root)
+    return (Join-Path $Root '.wt\config')
+}
+
+function Get-WorktreeConfigValue {
+    param(
+        [string]$Root,
+        [string]$Section,
+        [string]$Key,
+        [string]$Default = ''
+    )
+
+    $config = Get-WorktreeConfig -Root $Root
+    if (-not (Test-Path -LiteralPath $config)) { return $Default }
+
+    $curSection = ''
+    foreach ($line in @(Get-Content -LiteralPath $config -ErrorAction SilentlyContinue)) {
+        if ($null -eq $line) { continue }
+        $l = $line.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($l)) { continue }
+        if ($l.StartsWith('#')) { continue }
+        if ($l -match '^\[(.+)\]$') {
+            $curSection = $Matches[1].Trim()
+            continue
+        }
+        if ($l -match '^([^=]+)=(.*)$') {
+            $k = $Matches[1].Trim()
+            $v = $Matches[2].Trim()
+            if ($curSection -eq $Section -and $k -eq $Key) {
+                return $v
+            }
+        }
+    }
+    return $Default
+}
+
 function Get-WorktreeNames {
     $common = git rev-parse --git-common-dir 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($common)) { return @() }
@@ -93,8 +144,6 @@ function Get-WorktreeNames {
     foreach ($line in $lines) {
         if ($line -like 'worktree *') {
             $p = ($line.Substring(9)) -replace '\\', '/'
-            # Only report worktrees living under the repo root, and print them
-            # relative to it so nested names (e.g. feature/foo) survive.
             if ($p.StartsWith($root + '/')) {
                 $names += $p.Substring($root.Length + 1)
             }
@@ -103,19 +152,15 @@ function Get-WorktreeNames {
     return $names
 }
 
-# Compute the relative symlink target for a link living at
-#   $root/$WorktreeName/$RelPath  ->  $root/.shared/$RelPath
-# Uses forward slashes so the same target works under Git Bash / WSL too.
 function Get-CommonRelTarget {
     param([string]$WorktreeName, [string]$RelPath)
 
     $linkdir = $WorktreeName
     $sub = Split-Path -Parent $RelPath
     if ($sub -and $sub -ne '.') { $linkdir = "$linkdir/$sub" }
-    # depth = number of path segments in linkdir
     $depth = ($linkdir -split '[\\/]' | Where-Object { $_ }).Count
     $ups = '../' * $depth
-    return "$ups.shared/$RelPath"
+    return "$ups.wt/shared/$RelPath"
 }
 
 function Show-WorktreeSharedUsage {
@@ -125,18 +170,18 @@ Usage:
   worktree shared list                          (alias: ls)
   worktree shared remove <relpath>              (alias: rm)
 
-  add     Move <path> into the shared .shared\ directory at the repo root and
-          symlink it back into the worktree it came from. <path> may be
+  add     Move <path> into the shared .wt\shared\ directory at the repo root
+          and symlink it back into the worktree it came from. <path> may be
           prefixed with a worktree name (e.g. 'master\node_modules') or given
           relative to the worktree you're currently in (e.g. 'node_modules').
           Every subsequent `worktree switch` re-creates the symlinks in the
           worktree it enters.
-  list    Print the repo-relative paths currently shared in .shared\, one per
-          line (the contents of .shared\.manifest).
-  remove  Delete the shared <relpath> from .shared\ and remove every symlink
+  list    Print the repo-relative paths currently shared in .wt\shared\, one per
+          line (the contents of .wt\manifest).
+  remove  Delete the shared <relpath> from .wt\shared\ and remove every symlink
           pointing to it across all worktrees. Real files/folders at the path
-          in any worktree are left untouched. Destructive: the .shared copy is
-          deleted, not moved back.
+          in any worktree are left untouched. Destructive: the .wt\shared copy
+          is deleted, not moved back.
 '@
 }
 
@@ -174,10 +219,9 @@ function Invoke-WorktreeSharedAdd {
     $root = Resolve-WorktreeRoot 'shared add'
     if (-not $root) { return }
 
-    $common = Join-Path $root '.shared'
-    $manifest = Join-Path $common '.manifest'
+    $sharedDir = Get-WorktreeSharedDir -Root $root
+    $manifest = Get-WorktreeManifest -Root $root
 
-    # Resolve which worktree the path lives in (longest-name prefix first).
     $wtname = ''
     $relpath = ''
     $names = Get-WorktreeNames | Sort-Object { $_.Length } -Descending
@@ -216,9 +260,9 @@ function Invoke-WorktreeSharedAdd {
         return
     }
 
-    $dest = Join-Path $common $relpath
+    $dest = Join-Path $sharedDir $relpath
     if (Test-Path -LiteralPath $dest) {
-        Write-Error "worktree shared add: '$relpath' is already shared (.shared/$relpath exists)"
+        Write-Error "worktree shared add: '$relpath' is already shared (.wt/shared/$relpath exists)"
         return
     }
     if (Test-Path -LiteralPath $manifest) {
@@ -238,12 +282,9 @@ function Invoke-WorktreeSharedAdd {
     $linkTarget = Get-CommonRelTarget -WorktreeName $wtname -RelPath $relpath
     $null = New-Item -ItemType SymbolicLink -Path $source -Target $linkTarget
 
-    Write-Host "Shared '$relpath' (.shared/$relpath); symlinked into '$wtname'."
+    Write-Host "Shared '$relpath' (.wt/shared/$relpath); symlinked into '$wtname'."
 }
 
-# List the repo-relative paths currently shared in .shared\.manifest. Used by
-# `shared list` and by tab-completion for `shared remove`. Silent when not in a
-# repo or when no manifest exists.
 function Get-WorktreeSharedNames {
     $common = git rev-parse --git-common-dir 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($common)) { return @() }
@@ -251,7 +292,7 @@ function Get-WorktreeSharedNames {
         $common = Join-Path (Get-Location).Path $common
     }
     $root = (Split-Path -Parent $common) -replace '\\', '/'
-    $manifest = Join-Path $root '.shared/.manifest'
+    $manifest = Join-Path $root '.wt/manifest'
     if (-not (Test-Path -LiteralPath $manifest)) { return @() }
     $names = @()
     foreach ($line in @(Get-Content -LiteralPath $manifest -ErrorAction SilentlyContinue)) {
@@ -264,9 +305,9 @@ function Invoke-WorktreeSharedList {
     $root = Resolve-WorktreeRoot 'shared list'
     if (-not $root) { return }
 
-    $manifest = Join-Path $root '.shared\.manifest'
+    $manifest = Get-WorktreeManifest -Root $root
     if (-not (Test-Path -LiteralPath $manifest)) {
-        Write-Host "worktree shared list: no shared items (no .shared\.manifest manifest)"
+        Write-Host "worktree shared list: no shared items (no .wt\manifest manifest)"
         return
     }
 
@@ -297,10 +338,10 @@ function Invoke-WorktreeSharedRemove {
     $root = Resolve-WorktreeRoot 'shared remove'
     if (-not $root) { return }
 
-    $common = Join-Path $root '.shared'
-    $manifest = Join-Path $common '.manifest'
+    $sharedDir = Get-WorktreeSharedDir -Root $root
+    $manifest = Get-WorktreeManifest -Root $root
     if (-not (Test-Path -LiteralPath $manifest)) {
-        Write-Error "worktree shared remove: no shared items (no .shared\.manifest manifest)"
+        Write-Error "worktree shared remove: no shared items (no .wt\manifest manifest)"
         return
     }
 
@@ -310,14 +351,11 @@ function Invoke-WorktreeSharedRemove {
         return
     }
 
-    # 1. Delete the real file/folder from .shared\.
-    $target = Join-Path $common $RelPath
+    $target = Join-Path $sharedDir $RelPath
     if (Test-Path -LiteralPath $target) {
         Remove-Item -LiteralPath $target -Recurse -Force
     }
 
-    # 2. Rewrite the manifest without the removed relpath; delete the manifest
-    #    if it's now empty.
     $remaining = $existing | Where-Object { $_ -ne $RelPath -and -not [string]::IsNullOrEmpty($_) }
     if ($remaining) {
         Set-Content -LiteralPath $manifest -Value $remaining
@@ -325,8 +363,6 @@ function Invoke-WorktreeSharedRemove {
         Remove-Item -LiteralPath $manifest
     }
 
-    # 3. Walk every worktree and remove symlinks at the shared path. Real
-    #    files/folders are left untouched.
     $count = 0
     foreach ($name in (Get-WorktreeNames)) {
         if ([string]::IsNullOrEmpty($name)) { continue }
@@ -340,16 +376,17 @@ function Invoke-WorktreeSharedRemove {
         }
     }
 
-    Write-Host "Removed shared '$RelPath' (deleted from .shared, $count symlink(s) cleaned up)."
+    Write-Host "Removed shared '$RelPath' (deleted from .wt/shared, $count symlink(s) cleaned up)."
 }
 
-# Re-create .shared/ symlinks inside a worktree after switching into it.
-# Skips (with a warning) any relpath that already exists as a real file/folder.
 function Invoke-WorktreeLinkCommon {
     param([string]$Root, [string]$Branch)
 
-    $manifest = Join-Path $Root '.shared\.manifest'
+    $manifest = Get-WorktreeManifest -Root $Root
     if (-not (Test-Path -LiteralPath $manifest)) { return }
+
+    $autoLink = Get-WorktreeConfigValue -Root $Root -Section 'shared' -Key 'auto_link' -Default 'true'
+    if ($autoLink -in @('false', '0', 'no', 'off')) { return }
 
     $count = 0
     $skipped = 0
@@ -387,9 +424,8 @@ function Invoke-WorktreeClone {
         return
     }
 
-    # Derive the repo name from the URL (strip trailing slash and .git suffix).
     $repoName = $RepoUrl.TrimEnd('/')
-    $repoName = $repoName -replace '.*[\\/]', ''   # keep the leaf after the last slash
+    $repoName = $repoName -replace '.*[\\/]', ''
     $repoName = $repoName -replace '\.git$', ''
 
     if ([string]::IsNullOrEmpty($repoName)) {
@@ -402,7 +438,6 @@ function Invoke-WorktreeClone {
         return
     }
 
-    # Create the repo directory and work inside it.
     try {
         New-Item -ItemType Directory -Path $repoName -ErrorAction Stop | Out-Null
     } catch {
@@ -412,17 +447,14 @@ function Invoke-WorktreeClone {
 
     Push-Location -LiteralPath $repoName
     try {
-        # 1. Clone the repo into a hidden .git folder (bare).
         git clone --bare $RepoUrl .git
         if ($LASTEXITCODE -ne 0) { return }
 
-        # 1b. If no branch was given, ask the remote which branch its HEAD
-        #     points to (the same mechanism `git clone` uses internally).
         if ([string]::IsNullOrEmpty($Branch)) {
             $lines = git ls-remote --symref origin HEAD 2>$null
             $symrefLine = $lines | Where-Object { $_ -like 'ref: *' } | Select-Object -First 1
             if ($symrefLine) {
-                $rest   = $symrefLine.Substring(5)   # strip "ref: "
+                $rest   = $symrefLine.Substring(5)
                 $target = ($rest -split "`t")[0]
                 if ($target -like 'refs/heads/*') {
                     $Branch = $target -replace '^refs/heads/', ''
@@ -434,19 +466,15 @@ function Invoke-WorktreeClone {
             }
         }
 
-        # 2. Fix the fetch refspec so all remote branches are visible.
         git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
         if ($LASTEXITCODE -ne 0) { return }
 
-        # Populate the remote-tracking refs we just enabled.
         git fetch origin
         if ($LASTEXITCODE -ne 0) { return }
 
-        # 3. Create the first worktree for the main branch.
         git worktree add $Branch
         if ($LASTEXITCODE -ne 0) { return }
     } finally {
-        # 5. Get the user back out of the repo.
         Pop-Location
     }
 
@@ -466,10 +494,6 @@ function Invoke-WorktreeSwitch {
 
     $haveBase = -not [string]::IsNullOrEmpty($From)
 
-    # Default base for a brand-new branch: the HEAD of the worktree we're
-    # currently standing in. Resolve it to a concrete commit BEFORE we chdir to
-    # the repo root, otherwise it would mean the bare repo's default branch
-    # rather than where the user is.
     $base = $From
     if (-not $haveBase) {
         $base = git rev-parse HEAD 2>$null
@@ -481,7 +505,6 @@ function Invoke-WorktreeSwitch {
 
     $target = Join-Path $root $Branch
 
-    # Create the worktree only if the folder isn't there yet.
     if (-not (Test-Path -LiteralPath $target -PathType Container)) {
         git -C $root show-ref --verify --quiet "refs/heads/$Branch" 2>$null
         $localExists = ($LASTEXITCODE -eq 0)
@@ -489,17 +512,12 @@ function Invoke-WorktreeSwitch {
         $remoteExists = ($LASTEXITCODE -eq 0)
 
         if ($haveBase) {
-            # Explicit -From: always create a new branch off the given base.
             git -C $root worktree add -b $Branch $Branch $base
         } elseif ($localExists -or $remoteExists) {
-            # Branch already exists locally or on origin: let git DWIM (check it
-            # out / create a tracking branch). The base doesn't apply here.
             git -C $root worktree add $Branch
         } elseif (-not [string]::IsNullOrEmpty($base)) {
-            # Brand-new branch, based on the current worktree's HEAD.
             git -C $root worktree add -b $Branch $Branch $base
         } else {
-            # No current HEAD to base on: fall back to git's default.
             git -C $root worktree add $Branch
         }
         if ($LASTEXITCODE -ne 0) { return }
@@ -522,7 +540,6 @@ function Invoke-WorktreeRemove {
     if (-not [string]::IsNullOrEmpty($Branch)) {
         $target = Join-Path $root $Branch
     } else {
-        # No branch given: target the worktree we're currently sitting in.
         $top = git rev-parse --show-toplevel 2>$null
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($top)) {
             Write-Error 'worktree remove: no <branch-name> and not inside a worktree'
@@ -537,9 +554,6 @@ function Invoke-WorktreeRemove {
         return
     }
 
-    # If the current directory is inside the worktree being removed, step out
-    # to the repo root first so the worktree can be removed. If removal fails,
-    # step back so the user isn't left stranded at the repo root.
     $cur = (Get-Location).Path -replace '\\', '/'
     $tgt = ((Resolve-Path -LiteralPath $target).Path) -replace '\\', '/'
     $wasInside = $cur -eq $tgt -or $cur.StartsWith($tgt + '/')
@@ -563,7 +577,6 @@ function Invoke-WorktreeList {
     $root = Resolve-WorktreeRoot 'list'
     if (-not $root) { return }
 
-    # Drop the bare repo entry; only real worktrees are useful here.
     git -C $root worktree list | Where-Object { $_ -notmatch '\(bare\)$' }
 }
 
@@ -573,19 +586,15 @@ function worktree {
         [Parameter(Position = 0)]
         [string]$Command,
 
-        # Second positional: the repo URL for `clone`, or the branch name for
-        # `switch` / `remove`.
         [Parameter(Position = 1)]
         [string]$Name,
 
-        # Third positional: the <path> for `shared add`.
         [Parameter(Position = 2)]
         [string]$Path,
 
         [Alias('b')]
         [string]$Branch = '',
 
-        # Base branch/commit for a new branch created by `switch`.
         [string]$From,
 
         [Alias('f')]
@@ -615,7 +624,6 @@ function worktree {
     }
 }
 
-# Short alias: `wt` behaves exactly like `worktree`.
 function wt {
     [CmdletBinding()]
     param(
@@ -642,7 +650,6 @@ function wt {
     worktree @PSBoundParameters
 }
 
-# Complete the subcommand (first positional -> -Command).
 $WorktreeCommandCompleter = {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameter)
     $cmds = @(
@@ -652,7 +659,7 @@ $WorktreeCommandCompleter = {
         @{ Name = 'rm';     Help = 'Alias for remove' }
         @{ Name = 'list';   Help = 'List the existing worktrees' }
         @{ Name = 'ls';     Help = 'Alias for list' }
-        @{ Name = 'shared'; Help = 'Manage shared (.shared) files' }
+        @{ Name = 'shared'; Help = 'Manage shared (.wt/shared) files' }
         @{ Name = 'help';   Help = 'Show usage' }
     )
     $cmds |
@@ -663,7 +670,6 @@ $WorktreeCommandCompleter = {
         }
 }
 
-# Complete the branch name (second positional -> -Name) for switch/remove only.
 $WorktreeNameCompleter = {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameter)
     $sub = $null
@@ -680,7 +686,6 @@ $WorktreeNameCompleter = {
     }
 }
 
-# Complete the path (third positional -> -Path) for `shared add`.
 $WorktreePathCompleter = {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameter)
     $sub = $null; $subsub = $null
@@ -709,9 +714,6 @@ $WorktreePathCompleter = {
     }
 }
 
-# When dot-sourced (`. .\worktree.ps1`), the functions above are now available
-# in the caller's session; register tab-completion for them. When run directly
-# (`.\worktree.ps1 clone ...`), dispatch the script arguments instead.
 if ($MyInvocation.InvocationName -eq '.') {
     Register-ArgumentCompleter -CommandName worktree, wt -ParameterName Command -ScriptBlock $WorktreeCommandCompleter
     Register-ArgumentCompleter -CommandName worktree, wt -ParameterName Name -ScriptBlock $WorktreeNameCompleter

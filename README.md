@@ -5,7 +5,10 @@ A shell helper (`worktree`, alias `wt`) that manages a **bare-repo + worktrees**
 ```
 my-project/
 ├── .git              # bare clone (the real repo)
-├── .shared           # shared files, symlinked into every worktree
+├── .wt               # wt's directory (config, manifest, shared files)
+│   ├── config        # optional key=value config
+│   ├── manifest      # list of shared paths (one per line)
+│   └── shared/       # shared files, symlinked into every worktree
 ├── main              # worktree on main
 ├── feature/login     # worktree on feature/login
 └── hotfix/bug-42     # worktree on hotfix/bug-42
@@ -57,12 +60,12 @@ worktree remove feature/login
 | Command | Description |
 | --- | --- |
 | `clone <repo-url> [-b <main-branch>]` | Clone `<repo-url>` as a bare repo into `./<repo>/.git` and check out `<main-branch>` (default: the repository's default branch, auto-detected from the remote) as the first worktree. |
-| `switch <branch-name> [--from <base>]` | `cd` into the `<branch-name>` worktree, creating it with `git worktree add` if it doesn't exist yet. A brand-new branch is based on the current worktree's HEAD; use `--from <base>` to base it elsewhere. After entering, any shared `.common` items are symlinked in. |
+| `switch <branch-name> [--from <base>]` | `cd` into the `<branch-name>` worktree, creating it with `git worktree add` if it doesn't exist yet. A brand-new branch is based on the current worktree's HEAD; use `--from <base>` to base it elsewhere. After entering, any shared items are symlinked in (unless disabled via config). |
 | `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). |
 | `list` (alias: `ls`) | List the existing worktrees (the bare-repo entry is filtered out). |
-| `shared add <path>` | Move `<path>` into the shared `.shared/` directory at the repo root and symlink it back into the worktree it came from. `<path>` may be prefixed with a worktree name (`master/node_modules`) or given relative to the worktree you're in (`node_modules`). Every later `switch` re-creates the symlinks in the worktree it enters. |
-| `shared list` (alias: `ls`) | Print the repo-relative paths currently shared in `.shared/`, one per line (the contents of `.shared/.manifest`). |
-| `shared remove <relpath>` (alias: `rm`) | Delete the shared `<relpath>` from `.shared/` and remove every symlink pointing to it across all worktrees. Real files/folders at the path in any worktree are left untouched. **Destructive** — the `.shared` copy is deleted, not moved back. |
+| `shared add <path>` | Move `<path>` into the shared `.wt/shared/` directory at the repo root and symlink it back into the worktree it came from. `<path>` may be prefixed with a worktree name (`master/node_modules`) or given relative to the worktree you're in (`node_modules`). Every later `switch` re-creates the symlinks in the worktree it enters. |
+| `shared list` (alias: `ls`) | Print the repo-relative paths currently shared in `.wt/shared/`, one per line (the contents of `.wt/manifest`). |
+| `shared remove <relpath>` (alias: `rm`) | Delete the shared `<relpath>` from `.wt/shared/` and remove every symlink pointing to it across all worktrees. Real files/folders at the path in any worktree are left untouched. **Destructive** — the `.wt/shared` copy is deleted, not moved back. |
 
 ### Flag style per shell
 
@@ -86,7 +89,7 @@ The positional commands and their semantics are identical; only the option synta
 Some files and folders don't belong to a single branch — build output
 (`node_modules/`, `dist/`), editor caches, large local data — and you'd rather
 not copy or re-create them in every worktree. `worktree shared add` moves them
-into a single `.shared/` directory at the repo root and symlinks them into the
+into a single `.wt/shared/` directory at the repo root and symlinks them into the
 worktree they came from. Every subsequent `worktree switch` re-creates the
 symlinks in the worktree it enters.
 
@@ -94,15 +97,33 @@ symlinks in the worktree it enters.
 worktree shared add node_modules          # from inside a worktree
 worktree shared add master/node_modules    # from anywhere, by worktree name
 worktree shared list                       # print all shared paths
-worktree shared remove node_modules        # delete from .shared, clean up symlinks
+worktree shared remove node_modules        # delete from .wt/shared, clean up symlinks
 worktree switch feature/login             # feature/login/node_modules is symlinked
 ```
 
-`.shared/` lives next to the bare `.git`, outside any worktree, so git never
-tracks it. The list of shared paths is kept in `.shared/.manifest` (one
+`.wt/shared/` lives next to the bare `.git`, outside any worktree, so git never
+tracks it. The list of shared paths is kept in `.wt/manifest` (one
 repo-relative path per line). If a real file or folder already exists at a
 shared path when you `switch` into a worktree, it is left untouched and a
 warning is printed.
+
+## Configuration
+
+`wt` is zero-config by default. An optional `.wt/config` file (INI-style,
+key = value) can live at the repo root to tweak behavior:
+
+```ini
+# wt config — optional. Absent = zero-config (current behavior).
+[shared]
+auto_link = true        # re-symlink shared items on switch (default: true)
+```
+
+- **`shared.auto_link`** (default `true`) — when `false`/`0`/`no`/`off`,
+  `switch` does **not** re-create shared symlinks in the worktree it enters.
+  Existing symlinks are left in place; only automatic linking is suppressed.
+
+Other keys are reserved for future use. The file may be absent entirely, in
+which case `wt` behaves exactly as before.
 
 ## License
 
