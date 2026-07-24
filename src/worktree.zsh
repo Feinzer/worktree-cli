@@ -68,7 +68,8 @@ Usage:
            branch is based on the current worktree's HEAD; use --from <base>
            to base it on another branch/commit instead.
   remove   Remove the <branch-name> worktree. With no name, cd out of and
-           remove the worktree you're currently in.
+           remove the worktree you're currently in. Empty parent dirs left
+           by a nested name (fix/ after fix/login) are pruned.
   list     List the existing worktrees (runs `git worktree list`).
   shared   Manage files shared via .wt/shared/. `add` moves a path into
            .wt/shared/ and symlinks it back; `list` prints the shared paths;
@@ -304,6 +305,30 @@ _worktree_switch() {
     echo "Switched to worktree '$branch' ($target)"
 }
 
+# Prune the empty parent dirs a nested worktree leaves behind.
+# `fix/nested-branches` lives in `<root>/fix/`, so once it is gone `fix/` may be
+# an empty leftover. Walk up from the worktree's parent toward <root>, rmdir'ing
+# while empty; rmdir fails on the first non-empty dir, which stops the walk.
+# <root> itself is never a candidate (the loop ends before it).
+_worktree_prune_parents() {
+    local root="$1" branch="$2"
+    local dir="${branch%/}"
+
+    case "$dir" in
+        */*) dir="${dir%/*}" ;;
+        *) return 0 ;;   # flat name — no parent dir of ours to prune
+    esac
+
+    while [ -n "$dir" ] && [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+        rmdir "$root/$dir" 2>/dev/null || return 0
+        echo "Removed empty parent directory '$dir' ($root/$dir)"
+        case "$dir" in
+            */*) dir="${dir%/*}" ;;
+            *) dir="" ;;
+        esac
+    done
+}
+
 _worktree_remove() {
     local branch=""
     local force=false
@@ -348,7 +373,13 @@ _worktree_remove() {
             echo "worktree remove: no <branch-name> and not inside a worktree" >&2
             return 1
         }
-        branch="$(basename "$target")"
+        # Nested worktrees need the full <root>-relative name ('fix/x', not 'x').
+        local root_abs
+        root_abs="$(cd "$root" 2>/dev/null && pwd)" || root_abs="$root"
+        case "$target" in
+            "$root_abs"/*) branch="${target#"$root_abs"/}" ;;
+            *) branch="$(basename "$target")" ;;
+        esac
     fi
 
     if [ ! -d "$target" ]; then
@@ -373,6 +404,7 @@ _worktree_remove() {
         return 1
     }
     echo "Removed worktree '$branch' ($target)"
+    _worktree_prune_parents "$root" "$branch"
 }
 
 _worktree_list() {
