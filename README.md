@@ -76,7 +76,7 @@ you'd rather not install into `~/.local/lib`.
 
 ## Usage
 
-The four commands work the same across all three shells; only the flag style differs (see table below).
+The commands work the same across all three shells; only the flag style differs (see table below).
 
 ```bash
 worktree clone https://github.com/acme/widgets.git
@@ -94,6 +94,7 @@ worktree remove feature/login
 | `clone <repo-url> [-b <main-branch>]` | Clone `<repo-url>` as a bare repo into `./<repo>/.git` and check out `<main-branch>` (default: the repository's default branch, auto-detected from the remote) as the first worktree. |
 | `switch <branch-name> [--from <base>]` | `cd` into the `<branch-name>` worktree, creating it with `git worktree add` if it doesn't exist yet. A brand-new branch is based on the current worktree's HEAD; use `--from <base>` to base it elsewhere. After entering, any shared items are symlinked in (unless disabled via config). |
 | `remove [<branch-name>] [-f\|--force]` (alias: `rm`) | Remove the named worktree. With no name, remove the worktree you're currently in (stepping out to the repo root first so your shell isn't left in a deleted path). Empty parent directories left behind by a slash-separated name (`fix/` after removing `fix/login`) are cleaned up. |
+| `prune [-n\|--dry-run]` | Remove worktrees whose directory was deleted outside `wt` (e.g. with `rm -rf`). Clears the git admin files git still keeps for them and cleans up the empty parent directories a nested name leaves behind, just like `remove`. `-n`/`--dry-run` only lists what would be pruned. (PowerShell: `-DryRun`.) |
 | `list` (alias: `ls`) | List the existing worktrees (the bare-repo entry is filtered out). |
 | `shared add <path>` | Move `<path>` into the shared `.wt/shared/` directory at the repo root and symlink it back into the worktree it came from. `<path>` may be prefixed with a worktree name (`master/node_modules`) or given relative to the worktree you're in (`node_modules`). Every later `switch` re-creates the symlinks in the worktree it enters. |
 | `shared list` (alias: `ls`) | Print the repo-relative paths currently shared in `.wt/shared/`, one per line (the contents of `.wt/manifest`). |
@@ -115,6 +116,7 @@ The positional commands and their semantics are identical; only the option synta
 - **`switch` is DWIM-friendly.** If the branch already exists locally or on `origin`, it's checked out as a worktree. If it's brand-new, it's created off the current worktree's HEAD (the current commit is resolved *before* changing directories, so it reflects where you are, not the bare repo's default branch), or off `--from`/`-From` when given.
 - **`remove` won't strand your shell.** With no name it targets the worktree you're in and steps out to the repo root before deleting.
 - **`remove` cleans up nested parent directories.** A branch like `fix/login` lives at `<repo>/fix/login`, so removing it can leave an empty `fix/` behind. `remove` walks up from the worktree's parent toward the repo root and deletes each directory that is empty, stopping at the first one that still holds something — a sibling worktree (`fix/other`) or any stray file keeps the parent. Nothing but empty directories is ever deleted, and the repo root itself is never touched.
+- **`prune` reclaims worktrees deleted behind git's back.** If you `rm -rf` a worktree's directory instead of using `worktree remove`, git keeps its administrative files and still lists it (marked `prunable`). `prune` finds every such worktree, runs `git worktree prune` to clear those files, and then tidies up the empty parent directories with the same walk `remove` uses. Run it with `-n`/`--dry-run` first to see what it would touch — that pass changes nothing.
 - **`list` hides the bare repo.** The bare `.git` entry is filtered out; only real worktrees are shown.
 
 ## Shared files

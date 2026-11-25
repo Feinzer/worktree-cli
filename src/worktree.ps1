@@ -38,6 +38,7 @@ Usage:
   worktree clone <repo-url> [-Branch <main-branch>]   (-b alias)
   worktree switch <branch-name> [-From <base>]
   worktree remove [<branch-name>] [-Force]            (-f alias; rm alias)
+  worktree prune [-DryRun]
   worktree list                                       (ls alias)
   worktree shared add <path>
   worktree shared list                          (alias: ls)
@@ -52,6 +53,10 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, step out of and
            remove the worktree you're currently in. Empty parent dirs left
            by a nested name (fix\ after fix/login) are pruned.
+  prune    Remove worktrees whose directory was deleted outside wt (e.g. with
+           Remove-Item -Recurse). Clears their git admin files and tidies up
+           the empty parent dirs a nested name leaves behind. -DryRun just
+           lists what would be pruned.
   list     List the existing worktrees (runs `git worktree list`).
   shared   Manage files shared via .wt\shared\. `add` moves a path into
            .wt\shared\ and symlinks it back; `list` prints the shared paths;
@@ -605,6 +610,80 @@ function Invoke-WorktreeRemove {
     Remove-WorktreeEmptyParents -Root $root -Branch $Branch
 }
 
+# Strip the repo-root prefix from a worktree path, yielding its <root>-relative
+# name. git reports paths in the bare repo's own convention, which can differ
+# from a locally resolved path when symlinks are in play (e.g. a container
+# bind-mount), so try that first, then the resolved root, then the leaf.
+function Get-WorktreeRelName {
+    param([string]$Path, [string]$GitRoot, [string]$Root)
+
+    $p = $Path -replace '\\', '/'
+    foreach ($base in @($GitRoot, $Root)) {
+        if ([string]::IsNullOrEmpty($base)) { continue }
+        $b = $base -replace '\\', '/'
+        if ($p.StartsWith($b + '/')) {
+            return $p.Substring($b.Length + 1)
+        }
+    }
+    return (Split-Path -Leaf $p)
+}
+
+# Prune worktrees whose directory was removed outside wt (e.g. Remove-Item
+# -Recurse). git flags these as "prunable" in `worktree list --porcelain`;
+# `git worktree prune` clears their admin files. We gather the prunable entries
+# first so we can report them and tidy up the empty parent dirs a nested name
+# leaves behind, exactly like `remove`.
+function Invoke-WorktreePrune {
+    param([switch]$DryRun)
+
+    $root = Resolve-WorktreeRoot 'prune'
+    if (-not $root) { return }
+
+    # git records worktree paths in the bare repo's own path convention, which
+    # the `bare` entry reports too. Capture it and strip that prefix, so paths
+    # match even when our resolved root differs by a symlink.
+    $prunable = @()
+    $gitRoot = ''
+    $cur = ''
+    $lines = git -C $root worktree list --porcelain 2>$null
+    foreach ($line in $lines) {
+        if ($line -like 'worktree *') {
+            $cur = $line.Substring(9)
+        } elseif ($line -eq 'bare') {
+            $gitRoot = $cur
+        } elseif ($line -like 'prunable *') {
+            $prunable += [pscustomobject]@{
+                Path   = $cur
+                Reason = $line.Substring(9)
+            }
+        } elseif ([string]::IsNullOrEmpty($line)) {
+            $cur = ''
+        }
+    }
+
+    if ($prunable.Count -eq 0) {
+        Write-Host "worktree prune: nothing to prune"
+        return
+    }
+
+    if ($DryRun) {
+        foreach ($p in $prunable) {
+            $name = Get-WorktreeRelName -Path $p.Path -GitRoot $gitRoot -Root $root
+            Write-Host "Would prune worktree '$name' ($($p.Reason))"
+        }
+        return
+    }
+
+    git -C $root worktree prune
+    if ($LASTEXITCODE -ne 0) { return }
+
+    foreach ($p in $prunable) {
+        $name = Get-WorktreeRelName -Path $p.Path -GitRoot $gitRoot -Root $root
+        Write-Host "Pruned worktree '$name' ($($p.Reason))"
+        Remove-WorktreeEmptyParents -Root $root -Branch $name
+    }
+}
+
 function Invoke-WorktreeList {
     $root = Resolve-WorktreeRoot 'list'
     if (-not $root) { return }
@@ -632,6 +711,8 @@ function worktree {
         [Alias('f')]
         [switch]$Force,
 
+        [switch]$DryRun,
+
         [Alias('h')]
         [switch]$Help
     )
@@ -646,6 +727,7 @@ function worktree {
         'switch' { Invoke-WorktreeSwitch -Branch $Name -From $From }
         'remove' { Invoke-WorktreeRemove -Branch $Name -Force:$Force }
         'rm'     { Invoke-WorktreeRemove -Branch $Name -Force:$Force }
+        'prune'  { Invoke-WorktreePrune -DryRun:$DryRun }
         'list'   { Invoke-WorktreeList }
         'ls'     { Invoke-WorktreeList }
         'shared' { Invoke-WorktreeShared -Subcommand $Name -Path $Path }
@@ -676,6 +758,8 @@ function wt {
         [Alias('f')]
         [switch]$Force,
 
+        [switch]$DryRun,
+
         [Alias('h')]
         [switch]$Help
     )
@@ -689,6 +773,7 @@ $WorktreeCommandCompleter = {
         @{ Name = 'switch'; Help = 'Set-Location into a worktree, creating it if needed' }
         @{ Name = 'remove'; Help = 'Remove a worktree' }
         @{ Name = 'rm';     Help = 'Alias for remove' }
+        @{ Name = 'prune';  Help = 'Remove worktrees whose directory was deleted outside wt' }
         @{ Name = 'list';   Help = 'List the existing worktrees' }
         @{ Name = 'ls';     Help = 'Alias for list' }
         @{ Name = 'shared'; Help = 'Manage shared (.wt/shared) files' }
