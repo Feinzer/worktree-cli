@@ -33,6 +33,9 @@ worktree() {
         remove|rm)
             _worktree_remove "$@"
             ;;
+        prune)
+            _worktree_prune "$@"
+            ;;
         list|ls)
             _worktree_list "$@"
             ;;
@@ -56,6 +59,7 @@ Usage:
   worktree clone <repo-url> [-b <main-branch>]
   worktree switch <branch-name> [--from <base>]
   worktree remove [<branch-name>] [-f|--force]   (alias: rm)
+  worktree prune [-n|--dry-run]
   worktree list                                  (alias: ls)
   worktree shared add <path>
   worktree shared list                          (alias: ls)
@@ -70,6 +74,10 @@ Usage:
   remove   Remove the <branch-name> worktree. With no name, cd out of and
            remove the worktree you're currently in. Empty parent dirs left
            by a nested name (fix/ after fix/login) are pruned.
+  prune    Remove worktrees whose directory was deleted outside wt (e.g. with
+           `rm -rf`). Clears their git admin files and tidies up the empty
+           parent dirs a nested name leaves behind. -n/--dry-run just lists
+           what would be pruned.
   list     List the existing worktrees (runs `git worktree list`).
   shared   Manage files shared via .wt/shared/. `add` moves a path into
            .wt/shared/ and symlinks it back; `list` prints the shared paths;
@@ -407,6 +415,103 @@ _worktree_remove() {
     _worktree_prune_parents "$root" "$branch"
 }
 
+# Strip the repo-root prefix from a worktree path, yielding its <root>-relative
+# name. git reports paths in the bare repo's own convention, which can differ
+# from a locally resolved path when symlinks are in play (e.g. a container
+# bind-mount), so try that first, then the resolved root, then the basename.
+_worktree_relname() {
+    local path="$1" git_root="$2" root_abs="$3" root="$4"
+    if [ -n "$git_root" ] && [ "${path#"$git_root"/}" != "$path" ]; then
+        printf '%s' "${path#"$git_root"/}"
+    elif [ -n "$root_abs" ] && [ "${path#"$root_abs"/}" != "$path" ]; then
+        printf '%s' "${path#"$root_abs"/}"
+    elif [ "${path#"$root"/}" != "$path" ]; then
+        printf '%s' "${path#"$root"/}"
+    else
+        basename "$path"
+    fi
+}
+
+# Prune worktrees whose directory was removed outside wt (e.g. `rm -rf`).
+# git flags these as "prunable" in `worktree list --porcelain`; `git worktree
+# prune` clears their admin files. We gather the prunable entries first (path +
+# reason, one "<path>\t<reason>" per array slot) so we can report them and tidy
+# up the empty parent dirs a nested name leaves behind, exactly like `remove`.
+_worktree_prune() {
+    local dry_run=false
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -n|--dry-run)
+                dry_run=true
+                shift
+                ;;
+            -h|--help)
+                _worktree_usage
+                return 0
+                ;;
+            -*)
+                echo "worktree prune: unknown option '$1'" >&2
+                return 1
+                ;;
+            *)
+                echo "worktree prune: unexpected argument '$1'" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    local root
+    root="$(git rev-parse --git-common-dir 2>/dev/null)" || {
+        echo "worktree prune: not inside a worktree repo (no .git found)" >&2
+        return 1
+    }
+    root="$(dirname "$root")"
+
+    local root_abs
+    root_abs="$(cd "$root" 2>/dev/null && pwd)" || root_abs="$root"
+
+    # git records worktree paths in the bare repo's own path convention, which
+    # the `bare` entry reports too. Capture it and strip that prefix, so paths
+    # match even when our resolved root differs by a symlink.
+    local prunable=()
+    local git_root="" line cur=""
+    while IFS= read -r line; do
+        case "$line" in
+            "worktree "*) cur="${line#worktree }" ;;
+            bare)         git_root="$cur" ;;
+            "prunable "*) prunable+=( "$cur"$'\t'"${line#prunable }" ) ;;
+            "")           cur="" ;;
+        esac
+    done < <(git -C "$root" worktree list --porcelain 2>/dev/null)
+
+    if [ "${#prunable[@]}" -eq 0 ]; then
+        echo "worktree prune: nothing to prune"
+        return 0
+    fi
+
+    local entry path reason name
+    if [ "$dry_run" = true ]; then
+        for entry in "${prunable[@]}"; do
+            path="${entry%%$'\t'*}"
+            reason="${entry#*$'\t'}"
+            name="$(_worktree_relname "$path" "$git_root" "$root_abs" "$root")"
+            echo "Would prune worktree '$name' ($reason)"
+        done
+        return 0
+    fi
+
+    git -C "$root" worktree prune || return 1
+
+    for entry in "${prunable[@]}"; do
+        path="${entry%%$'\t'*}"
+        reason="${entry#*$'\t'}"
+        name="$(_worktree_relname "$path" "$git_root" "$root_abs" "$root")"
+        echo "Pruned worktree '$name' ($reason)"
+        _worktree_prune_parents "$root" "$name"
+    done
+}
+
 _worktree_list() {
     if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
         _worktree_usage
@@ -736,6 +841,7 @@ _worktree_complete() {
             'switch:cd into a worktree, creating it if needed'
             'remove:Remove a worktree'
             'rm:Alias for remove'
+            'prune:Remove worktrees whose directory was deleted outside wt'
             'list:List the existing worktrees'
             'ls:Alias for list'
             'shared:Manage shared (.wt/shared) files'
@@ -780,6 +886,11 @@ _worktree_complete() {
                 names=(${(f)"$(_worktree_names)"})
                 _describe -t worktrees 'worktree' names
             fi
+            ;;
+        prune)
+            _arguments \
+                '(-n --dry-run)'{-n,--dry-run}'[list what would be pruned without removing]' \
+                '(-h --help)'{-h,--help}'[show usage]'
             ;;
         shared)
             if (( CURRENT == 3 )); then
